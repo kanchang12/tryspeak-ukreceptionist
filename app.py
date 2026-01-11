@@ -3,6 +3,8 @@ from flask_cors import CORS
 from dotenv import load_dotenv
 import os
 from datetime import datetime
+import jwt
+from supabase import create_client
 
 load_dotenv()
 
@@ -13,6 +15,12 @@ from services.cockroachdb_service import DB
 from services.vapi_service import create_vapi_assistant
 from services.sms_service import send_sms
 from services.prompt_generator import generate_assistant_prompt
+
+SUPABASE_URL = os.environ["SUPABASE_URL"]
+SUPABASE_ANON_KEY = os.environ["SUPABASE_ANON_KEY"]
+SUPABASE_JWT_SECRET = os.environ["SUPABASE_JWT_SECRET"]
+
+supabase_anon = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
 
 # ============================================================================
 # HTML PAGES
@@ -61,35 +69,30 @@ serializer = URLSafeTimedSerializer(AUTH_SECRET)
 import secrets
 from datetime import datetime, timedelta
 
+
+
 @app.route("/api/auth/request-otp", methods=["POST"])
-def request_otp():
+def api_auth_request_otp():
     data = request.json or {}
     phone = (data.get("phone") or "").strip()
 
-    if not phone:
-        return jsonify({"error": "Missing phone"}), 400
+    if not phone or not phone.startswith("+"):
+        return jsonify({"error": "Phone must include country code, e.g. +447..." }), 400
 
-    # allow only if user exists
-    user = DB.find_one("business_owners", {"phone_number": phone, "status": "active"})
-    if not user:
+    # ✅ IMPORTANT: allow OTP send ONLY if business exists
+    owner = DB.find_one("business_owners", {"phone_number": phone, "status": "active"})
+    if not owner:
         return jsonify({"error": "No account for this phone"}), 404
 
-    otp = f"{secrets.randbelow(1000000):06d}"
-    expires_at = datetime.utcnow() + timedelta(minutes=10)
-
-    DB.insert("login_otps", {
-        "phone_number": phone,
-        "otp": otp,
-        "expires_at": expires_at,
-        "used": False
-    })
-
-    send_sms(to=phone, message=f"TrySpeak OTP: {otp} (valid 10 min)")
-    return jsonify({"status": "sent"}), 200
+    try:
+        supabase_anon.auth.sign_in_with_otp({"phone": phone})
+        return jsonify({"status": "sent"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
 
 
 @app.route("/api/auth/verify-otp", methods=["POST"])
-def verify_otp():
+def api_auth_verify_otp():
     data = request.json or {}
     phone = (data.get("phone") or "").strip()
     otp = (data.get("otp") or "").strip()
@@ -97,38 +100,45 @@ def verify_otp():
     if not phone or not otp:
         return jsonify({"error": "Missing phone or otp"}), 400
 
-    rows = DB.query("""
-        SELECT id, otp, expires_at, used
-        FROM login_otps
-        WHERE phone_number = %s
-        ORDER BY created_at DESC
-        LIMIT 1
-    """, [phone])
+    try:
+        out = supabase_anon.auth.verify_otp({
+            "phone": phone,
+            "token": otp,
+            "type": "sms"
+        })
 
-    if not rows:
-        return jsonify({"error": "OTP not found"}), 401
+        session = getattr(out, "session", None)
+        if not session or not session.access_token:
+            return jsonify({"error": "OTP verified but no session returned"}), 401
 
-    row = rows[0]
+        access_token = session.access_token
 
-    if row["used"]:
-        return jsonify({"error": "OTP already used"}), 401
+        # ✅ verify Supabase token and read user id
+        decoded = jwt.decode(
+            access_token,
+            SUPABASE_JWT_SECRET,
+            algorithms=["HS256"],
+            options={"verify_aud": False}
+        )
+        auth_user_id = decoded.get("sub")
 
-    exp = row["expires_at"]
-    if isinstance(exp, str):
-        exp = datetime.fromisoformat(exp.replace("Z", "+00:00")).replace(tzinfo=None)
+        if not auth_user_id:
+            return jsonify({"error": "Invalid Supabase token"}), 401
 
-    if datetime.utcnow() > exp:
-        return jsonify({"error": "OTP expired"}), 401
+        # ✅ MUST be active business owner in your DB
+        owner = DB.find_one("business_owners", {"phone_number": phone, "status": "active"})
+        if not owner:
+            return jsonify({"error": "No account for this phone"}), 403
 
-    if row["otp"] != otp:
-        return jsonify({"error": "Invalid OTP"}), 401
+        # optional: store auth_user_id once (so you can map later)
+        if not owner.get("auth_user_id"):
+            DB.update("business_owners", {"id": owner["id"]}, {"auth_user_id": auth_user_id})
 
-    DB.update("login_otps", {"id": row["id"]}, {"used": True})
+        token = serializer.dumps({"owner_id": owner["id"]})
+        return jsonify({"token": token, "owner_id": owner["id"]}), 200
 
-    owner = DB.find_one("business_owners", {"phone_number": phone, "status": "active"})
-    token = serializer.dumps({"owner_id": owner["id"]})
-
-    return jsonify({"token": token, "owner_id": owner["id"]}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
 
 
 

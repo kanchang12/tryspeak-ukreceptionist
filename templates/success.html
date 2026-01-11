@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Success - TrySpeak</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.2.3/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <style>
+        body { background: linear-gradient(135deg, #FEF3C7 0%, #FFFFFF 50%); min-height: 100vh; padding: 3rem 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+        .container { max-width: 700px; }
+        .success-box { background: white; padding: 3rem; border-radius: 12px; box-shadow: 0 10px 40px rgba(0,0,0,0.1); text-align: center; }
+        .icon { font-size: 72px; margin-bottom: 1.5rem; }
+        h1 { color: #111; margin-bottom: 1rem; font-size: 32px; font-weight: 700; }
+        p { color: #555; margin-bottom: 2rem; }
+        .phone-box { background: #FEF3C7; padding: 2rem; border-radius: 8px; margin: 2rem 0; }
+        .phone-number { font-size: 36px; font-weight: 700; color: #F59E0B; font-family: monospace; margin: 1rem 0; }
+        .instructions { background: #F9FAFB; padding: 2rem; border-radius: 8px; margin: 2rem 0; text-align: left; }
+        .instructions h4 { color: #111; margin-bottom: 1rem; }
+        .instructions ol { color: #374151; line-height: 1.8; }
+        .note { background: #FEF3C7; padding: 1rem; border-radius: 6px; color: #92400E; font-size: 14px; margin-top: 2rem; }
+        .btn { padding: 0.875rem 2rem; border-radius: 6px; font-weight: 600; text-decoration: none; }
+        .btn-secondary { background: white; color: #F59E0B; border: 2px solid #F59E0B; }
+        .btn-secondary:hover { background: #FEF3C7; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="success-box">
+            <div class="icon">✅</div>
+            <h1>Welcome to TrySpeak!</h1>
+            <p>Your 14-day free trial has started. Check your phone for next steps.</p>
+
+            <div class="phone-box">
+                <h3>📞 Next Step: Call This Number Now</h3>
+                <div class="phone-number">0800 XXX XXX</div>
+                <p style="color: #6B7280; margin: 0;">We've also sent this to your phone via SMS</p>
+            </div>
+
+            <div class="instructions">
+                <h4>What Happens on the Call?</h4>
+                <ol>
+                    <li>Our AI will interview you about your business (20-30 minutes)</li>
+                    <li>Tell us about your services, hours, emergency procedures</li>
+                    <li>Your custom AI receptionist will be ready in 2 hours</li>
+                    <li>We'll text you the new number to forward your calls to</li>
+                </ol>
+            </div>
+
+            <div class="note">
+                <strong>💡 Pro Tip:</strong> Have your business details ready - services you offer, working hours, pricing, areas you cover, what counts as an emergency.
+            </div>
+
+            <div style="margin-top: 2rem;">
+                <a href="/" class="btn btn-secondary">Back to Home</a>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const name = localStorage.getItem('signup_name');
+        if (name) {
+            document.querySelector('h1').textContent = `Welcome to TrySpeak, ${name}!`;
+        }
+    </script>
+</body>
+</html>

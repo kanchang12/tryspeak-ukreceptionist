@@ -99,6 +99,6 @@ class DB:
         """
         logger.warning("Raw SQL queries not directly supported with Supabase client. Use RPC functions instead.")
         return []
-
+db_instance = DB()
 # Initialize on import (but it's a no-op now)
 init_db()

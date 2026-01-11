@@ -49,6 +49,33 @@ def admin_page():
 # ============================================================================
 # API ROUTES
 # ============================================================================
+from werkzeug.security import check_password_hash
+
+@app.route("/api/auth/login", methods=["POST", 'GET'])
+def api_auth_login():
+    data = request.json or {}
+    email = (data.get("email") or "").strip().lower()
+    password = (data.get("password") or "").strip()
+
+    if not email or not password:
+        return jsonify({"error": "Missing email or password"}), 400
+
+    user = DB.find_one("business_owners", {"email": email, "status": "active"})
+    if not user:
+        return jsonify({"error": "Invalid login"}), 401
+
+    # your column name might be password_hash OR password
+    stored_hash = user.get("password_hash") or user.get("password")
+    if not stored_hash or not check_password_hash(stored_hash, password):
+        return jsonify({"error": "Invalid login"}), 401
+
+    return jsonify({
+        "status": "ok",
+        "owner_id": user["id"],
+        "business_name": user.get("business_name")
+    }), 200
+
+
 
 @app.route('/api/onboarding/start', methods=['POST'])
 def start_onboarding():

@@ -45,10 +45,7 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app)
 
-from services.cockroachdb_service import DB
-from services.vapi_service import create_vapi_assistant
-from services.sms_service import send_sms
-from services.prompt_generator import generate_assistant_prompt
+
 
 # =============================================================================
 # CONFIG

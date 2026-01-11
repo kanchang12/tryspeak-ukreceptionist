@@ -1,231 +1,104 @@
-import psycopg2
-from psycopg2.extras import RealDictCursor
+from supabase import create_client, Client
 import os
+from datetime import datetime
+from typing import Dict, List, Optional
+import logging
 
-# Supabase PostgreSQL connection
-DATABASE_URL = os.getenv('SUPABASE_DATABASE_URL')
+logger = logging.getLogger(__name__)
 
-def get_connection():
-    """Get database connection"""
-    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+# Initialize Supabase
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY", "")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
+
+supabase: Client = None
+supabase_admin: Client = None
+
+try:
+    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+    supabase_admin = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+    logger.info("Supabase connected successfully")
+except Exception as e:
+    logger.error(f"Supabase init failed: {e}")
 
 def init_db():
-    """Create tables if they don't exist"""
-    conn = get_connection()
-    cursor = conn.cursor()
-    
-    # Signups table
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS signups (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            name VARCHAR(255),
-            email VARCHAR(255),
-            phone_number VARCHAR(20),
-            business_name VARCHAR(255),
-            business_type VARCHAR(50),
-            message TEXT,
-            referral_code_used VARCHAR(50),
-            status VARCHAR(20),
-            created_at TIMESTAMP DEFAULT NOW()
-        )
-    """)
-    
-    # Onboarding calls table
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS onboarding_calls (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            signup_email VARCHAR(255),
-            signup_phone VARCHAR(20),
-            signup_name VARCHAR(255),
-            business_type VARCHAR(50),
-            vapi_call_id VARCHAR(255),
-            call_started_at TIMESTAMP,
-            call_ended_at TIMESTAMP,
-            call_duration INT,
-            full_transcript TEXT,
-            recording_url TEXT,
-            status VARCHAR(20),
-            reviewed_at TIMESTAMP,
-            reviewed_by VARCHAR(255),
-            business_owner_id UUID,
-            created_at TIMESTAMP DEFAULT NOW()
-        )
-    """)
-    
-    # Business owners table
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS business_owners (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            email VARCHAR(255) UNIQUE,
-            phone_number VARCHAR(20),
-            business_name VARCHAR(255),
-            business_type VARCHAR(50),
-            vapi_assistant_id VARCHAR(255),
-            vapi_phone_number VARCHAR(20),
-            onboarding_transcript TEXT,
-            referral_code VARCHAR(50),
-            status VARCHAR(20),
-            ai_enabled BOOLEAN DEFAULT TRUE,
-            plan VARCHAR(20) DEFAULT 'starter',
-            monthly_price DECIMAL(10,2) DEFAULT 75.00,
-            created_at TIMESTAMP DEFAULT NOW()
-        )
-    """)
-    
-    # Their customers table
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS their_customers (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            business_owner_id UUID,
-            phone_number VARCHAR(20),
-            name VARCHAR(255),
-            email VARCHAR(255),
-            total_calls INT DEFAULT 0,
-            customer_type VARCHAR(20) DEFAULT 'new',
-            last_contact TIMESTAMP,
-            created_at TIMESTAMP DEFAULT NOW(),
-            UNIQUE(business_owner_id, phone_number)
-        )
-    """)
-    
-    # Interactions table
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS interactions (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            business_owner_id UUID,
-            customer_id UUID,
-            type VARCHAR(50),
-            channel VARCHAR(20),
-            caller_phone VARCHAR(20),
-            call_duration INT,
-            recording_url TEXT,
-            transcript TEXT,
-            summary TEXT,
-            is_emergency BOOLEAN DEFAULT FALSE,
-            priority VARCHAR(20) DEFAULT 'normal',
-            status VARCHAR(20),
-            scheduled_datetime TIMESTAMP,
-            created_at TIMESTAMP DEFAULT NOW()
-        )
-    """)
-    
-    # Referrals table
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS referrals (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            referrer_id UUID,
-            referee_email VARCHAR(255),
-            referee_id UUID,
-            referral_code VARCHAR(50),
-            status VARCHAR(20) DEFAULT 'pending',
-            referrer_credit_amount DECIMAL(10,2) DEFAULT 25.00,
-            referee_discount_amount DECIMAL(10,2) DEFAULT 25.00,
-            referrer_credit_applied BOOLEAN DEFAULT FALSE,
-            referee_discount_applied BOOLEAN DEFAULT FALSE,
-            created_at TIMESTAMP DEFAULT NOW(),
-            completed_at TIMESTAMP,
-            UNIQUE(referrer_id, referee_email)
-        )
-    """)
-    
-    conn.commit()
-    cursor.close()
-    conn.close()
+    """Tables are already created via SQL in Supabase dashboard - this is a no-op"""
+    logger.info("Database tables should exist in Supabase")
+    pass
 
 class DB:
-    """Database helper class"""
+    """Database helper class using Supabase client"""
     
     @staticmethod
-    def insert(table, data):
+    def insert(table: str, data: Dict) -> Optional[Dict]:
         """Insert and return row"""
-        columns = ', '.join(data.keys())
-        placeholders = ', '.join(['%s'] * len(data))
-        values = list(data.values())
-        
-        sql = f"INSERT INTO {table} ({columns}) VALUES ({placeholders}) RETURNING *"
-        
-        conn = get_connection()
-        cursor = conn.cursor()
-        cursor.execute(sql, values)
-        result = cursor.fetchone()
-        conn.commit()
-        cursor.close()
-        conn.close()
-        return dict(result) if result else None
+        try:
+            result = supabase_admin.table(table).insert(data).execute()
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.error(f"Insert failed: {e}")
+            return None
     
     @staticmethod
-    def find_one(table, where):
+    def find_one(table: str, where: Dict) -> Optional[Dict]:
         """Find one row"""
-        conditions = ' AND '.join([f"{k} = %s" for k in where.keys()])
-        values = list(where.values())
-        
-        sql = f"SELECT * FROM {table} WHERE {conditions} LIMIT 1"
-        
-        conn = get_connection()
-        cursor = conn.cursor()
-        cursor.execute(sql, values)
-        result = cursor.fetchone()
-        cursor.close()
-        conn.close()
-        return dict(result) if result else None
+        try:
+            query = supabase_admin.table(table).select('*')
+            for key, value in where.items():
+                query = query.eq(key, value)
+            result = query.single().execute()
+            return result.data if result.data else None
+        except Exception as e:
+            logger.error(f"Find one failed: {e}")
+            return None
     
     @staticmethod
-    def find_many(table, where=None, order_by=None, limit=None):
+    def find_many(table: str, where: Dict = None, order_by: str = None, limit: int = None) -> List[Dict]:
         """Find many rows"""
-        sql = f"SELECT * FROM {table}"
-        values = []
-        
-        if where:
-            conditions = ' AND '.join([f"{k} = %s" for k in where.keys()])
-            sql += f" WHERE {conditions}"
-            values = list(where.values())
-        
-        if order_by:
-            sql += f" ORDER BY {order_by}"
-        
-        if limit:
-            sql += f" LIMIT {limit}"
-        
-        conn = get_connection()
-        cursor = conn.cursor()
-        cursor.execute(sql, values)
-        results = cursor.fetchall()
-        cursor.close()
-        conn.close()
-        return [dict(r) for r in results]
+        try:
+            query = supabase_admin.table(table).select('*')
+            
+            if where:
+                for key, value in where.items():
+                    query = query.eq(key, value)
+            
+            if order_by:
+                # Parse order_by string like "created_at DESC"
+                parts = order_by.split()
+                column = parts[0]
+                ascending = len(parts) == 1 or parts[1].upper() == 'ASC'
+                query = query.order(column, desc=not ascending)
+            
+            if limit:
+                query = query.limit(limit)
+            
+            result = query.execute()
+            return result.data if result.data else []
+        except Exception as e:
+            logger.error(f"Find many failed: {e}")
+            return []
     
     @staticmethod
-    def update(table, where, data):
+    def update(table: str, where: Dict, data: Dict) -> bool:
         """Update rows"""
-        set_clause = ', '.join([f"{k} = %s" for k in data.keys()])
-        where_clause = ' AND '.join([f"{k} = %s" for k in where.keys()])
-        values = list(data.values()) + list(where.values())
-        
-        sql = f"UPDATE {table} SET {set_clause} WHERE {where_clause}"
-        
-        conn = get_connection()
-        cursor = conn.cursor()
-        cursor.execute(sql, values)
-        conn.commit()
-        cursor.close()
-        conn.close()
+        try:
+            query = supabase_admin.table(table).update(data)
+            for key, value in where.items():
+                query = query.eq(key, value)
+            query.execute()
+            return True
+        except Exception as e:
+            logger.error(f"Update failed: {e}")
+            return False
     
     @staticmethod
-    def query(sql, params=None):
-        """Execute raw SQL"""
-        conn = get_connection()
-        cursor = conn.cursor()
-        cursor.execute(sql, params or ())
-        
-        if sql.strip().upper().startswith('SELECT'):
-            results = cursor.fetchall()
-            cursor.close()
-            conn.close()
-            return [dict(r) for r in results]
-        else:
-            conn.commit()
-            cursor.close()
-            conn.close()
+    def query(sql: str, params: List = None) -> List[Dict]:
+        """
+        Execute raw SQL via RPC function
+        Note: For complex queries, you may need to create custom RPC functions in Supabase
+        """
+        logger.warning("Raw SQL queries not directly supported with Supabase client. Use RPC functions instead.")
+        return []
 
-# Initialize on import
+# Initialize on import (but it's a no-op now)
 init_db()

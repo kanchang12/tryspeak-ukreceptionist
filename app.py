@@ -58,30 +58,77 @@ AUTH_SECRET = os.getenv("AUTH_SECRET", "change-me")
 serializer = URLSafeTimedSerializer(AUTH_SECRET)
 
 
-@app.route("/api/auth/login", methods=["POST"])
-def api_auth_login():
+import secrets
+from datetime import datetime, timedelta
+
+@app.route("/api/auth/request-otp", methods=["POST"])
+def request_otp():
     data = request.json or {}
+    phone = (data.get("phone") or "").strip()
 
-    email = (data.get("email") or "").strip().lower()
-    password = (data.get("password") or "").strip()
+    if not phone:
+        return jsonify({"error": "Missing phone"}), 400
 
-    if not email or not password:
-        return jsonify({"error": "Missing email or password"}), 400
-
-    user = DB.find_one("business_owners", {"email": email})
+    # allow only if user exists
+    user = DB.find_one("business_owners", {"phone_number": phone, "status": "active"})
     if not user:
-        return jsonify({"error": "Invalid login"}), 401
+        return jsonify({"error": "No account for this phone"}), 404
 
-    stored_hash = user.get("password_hash")
-    if not stored_hash:
-        return jsonify({"error": "Password not set for this user"}), 500
+    otp = f"{secrets.randbelow(1000000):06d}"
+    expires_at = datetime.utcnow() + timedelta(minutes=10)
 
-    if not check_password_hash(stored_hash, password):
-        return jsonify({"error": "Invalid login"}), 401
+    DB.insert("login_otps", {
+        "phone_number": phone,
+        "otp": otp,
+        "expires_at": expires_at,
+        "used": False
+    })
 
-    token = serializer.dumps({"owner_id": user["id"]})
+    send_sms(to=phone, message=f"TrySpeak OTP: {otp} (valid 10 min)")
+    return jsonify({"status": "sent"}), 200
 
-    return jsonify({"token": token}), 200
+
+@app.route("/api/auth/verify-otp", methods=["POST"])
+def verify_otp():
+    data = request.json or {}
+    phone = (data.get("phone") or "").strip()
+    otp = (data.get("otp") or "").strip()
+
+    if not phone or not otp:
+        return jsonify({"error": "Missing phone or otp"}), 400
+
+    rows = DB.query("""
+        SELECT id, otp, expires_at, used
+        FROM login_otps
+        WHERE phone_number = %s
+        ORDER BY created_at DESC
+        LIMIT 1
+    """, [phone])
+
+    if not rows:
+        return jsonify({"error": "OTP not found"}), 401
+
+    row = rows[0]
+
+    if row["used"]:
+        return jsonify({"error": "OTP already used"}), 401
+
+    exp = row["expires_at"]
+    if isinstance(exp, str):
+        exp = datetime.fromisoformat(exp.replace("Z", "+00:00")).replace(tzinfo=None)
+
+    if datetime.utcnow() > exp:
+        return jsonify({"error": "OTP expired"}), 401
+
+    if row["otp"] != otp:
+        return jsonify({"error": "Invalid OTP"}), 401
+
+    DB.update("login_otps", {"id": row["id"]}, {"used": True})
+
+    owner = DB.find_one("business_owners", {"phone_number": phone, "status": "active"})
+    token = serializer.dumps({"owner_id": owner["id"]})
+
+    return jsonify({"token": token, "owner_id": owner["id"]}), 200
 
 
 

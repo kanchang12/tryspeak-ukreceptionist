@@ -54,37 +54,14 @@ from flask import request, jsonify
 from werkzeug.security import check_password_hash
 from itsdangerous import URLSafeTimedSerializer
 
-# ---- Token signer ----
 AUTH_SECRET = os.getenv("AUTH_SECRET", "change-me")
 serializer = URLSafeTimedSerializer(AUTH_SECRET)
-
-# ---- Detect which password column exists in Supabase ----
-def detect_password_column():
-    cols = DB.query("""
-        SELECT column_name
-        FROM information_schema.columns
-        WHERE table_schema = 'public'
-          AND table_name = 'business_owners'
-    """)
-
-    colset = {r["column_name"] for r in cols}
-
-    # Pick the first match that exists
-    for c in ("password_hash", "hashed_password", "password"):
-        if c in colset:
-            return c
-
-    raise RuntimeError(
-        "No password column found in business_owners. "
-        "Expected one of: password_hash / hashed_password / password"
-    )
-
-PASSWORD_COL = detect_password_column()
 
 
 @app.route("/api/auth/login", methods=["POST"])
 def api_auth_login():
     data = request.json or {}
+
     email = (data.get("email") or "").strip().lower()
     password = (data.get("password") or "").strip()
 
@@ -95,9 +72,9 @@ def api_auth_login():
     if not user:
         return jsonify({"error": "Invalid login"}), 401
 
-    stored_hash = user.get(PASSWORD_COL)
+    stored_hash = user.get("password_hash")
     if not stored_hash:
-        return jsonify({"error": f"User missing {PASSWORD_COL}"}), 500
+        return jsonify({"error": "Password not set for this user"}), 500
 
     if not check_password_hash(stored_hash, password):
         return jsonify({"error": "Invalid login"}), 401
@@ -105,6 +82,7 @@ def api_auth_login():
     token = serializer.dumps({"owner_id": user["id"]})
 
     return jsonify({"token": token}), 200
+
 
 
 

@@ -2,8 +2,8 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 import os
 
-# CockroachDB connection string
-DATABASE_URL = os.getenv('DATABASE_URL')
+# Supabase PostgreSQL connection
+DATABASE_URL = os.getenv('SUPABASE_DATABASE_URL')
 
 def get_connection():
     """Get database connection"""

@@ -83,6 +83,26 @@ Call this number NOW: {onboarding_phone}
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route("/admin", methods=["GET", "POST"])
+def admin():
+    token_ok = False
+
+    if request.method == "POST":
+        token = request.form.get("token")
+        if token == os.getenv("ADMIN_TOKEN"):
+            token_ok = True
+
+    if not token_ok:
+        return render_template("admin.html", logged_in=False)
+
+    calls = DB.find_many(
+        "onboarding_calls",
+        order_by="created_at DESC",
+        limit=50
+    )
+
+    return render_template("admin.html", logged_in=True, calls=calls)
+
 
 @app.route('/api/onboarding/webhook/call-ended', methods=['POST'])
 def onboarding_call_ended():

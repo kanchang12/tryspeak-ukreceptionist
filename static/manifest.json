@@ -51,7 +51,7 @@
       "purpose": "any"
     },
     {
-      "src": "/static/images/icon-512.png",
+      "src": "/static/images/icon.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any maskable"

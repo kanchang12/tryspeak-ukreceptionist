@@ -45,7 +45,7 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app)
 
-
+from services.cockroachdb_service import DB
 
 # =============================================================================
 # CONFIG

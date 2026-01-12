@@ -193,7 +193,7 @@ def admin_page():
 # =============================================================================
 # AUTH (SUPABASE OTP)
 # =============================================================================
-@app.route("/api/auth/request-otp", methods=["POST"])
+@app.route("/api/auth/request-otp", methods=["POST", "GET"])
 def api_auth_request_otp():
     data = request.json or {}
     phone = (data.get("phone") or "").strip()
@@ -213,7 +213,7 @@ def api_auth_request_otp():
         return jsonify({"error": str(e)}), 400
 
 
-@app.route("/api/auth/verify-otp", methods=["POST"])
+@app.route("/api/auth/verify-otp", methods=["POST", "GET"])
 def api_auth_verify_otp():
     data = request.json or {}
     phone = (data.get("phone") or "").strip()
@@ -253,7 +253,7 @@ def api_auth_verify_otp():
 # =============================================================================
 # BILLING (STRIPE)
 # =============================================================================
-@app.route("/api/billing/checkout", methods=["POST"])
+@app.route("/api/billing/checkout", methods=["POST", "GET"])
 def api_billing_checkout():
     owner, err = require_app_auth()
     if err:
@@ -285,7 +285,7 @@ def api_billing_checkout():
         return jsonify({"error": str(e)}), 400
 
 
-@app.route("/api/stripe/webhook", methods=["POST"])
+@app.route("/api/stripe/webhook", methods=["POST", "GET"])
 def api_stripe_webhook():
     if not STRIPE_WEBHOOK_SECRET:
         return jsonify({"error": "Stripe webhook not configured"}), 500
@@ -330,7 +330,7 @@ def api_stripe_webhook():
 # =============================================================================
 # ONBOARDING
 # =============================================================================
-@app.route("/api/onboarding/start", methods=["POST"])
+@app.route("/api/onboarding/start", methods=["POST", "GET"])
 def start_onboarding():
     data = request.json
 
@@ -364,7 +364,7 @@ Call this number NOW: {onboarding_phone}
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/onboarding/webhook/call-ended", methods=["POST"])
+@app.route("/api/onboarding/webhook/call-ended", methods=["POST", "GET"])
 def onboarding_call_ended():
     data = request.json
     call = data.get("call", {})
@@ -464,7 +464,7 @@ def get_onboarding_detail(onboarding_id):
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/admin/onboarding/<onboarding_id>/create-assistant", methods=["POST"])
+@app.route("/api/admin/onboarding/<onboarding_id>/create-assistant", methods=["POST", "GET"])
 def create_assistant_from_onboarding(onboarding_id):
     try:
         onboarding = DB.find_one("onboarding_calls", {"id": onboarding_id})
@@ -535,7 +535,7 @@ Referral: {referral_code}""",
 # =============================================================================
 # VAPI WEBHOOKS (unchanged)
 # =============================================================================
-@app.route("/api/vapi/call-started", methods=["POST"])
+@app.route("/api/vapi/call-started", methods=["POST", "GET"])
 def customer_call_started():
     data = request.json
     call = data.get("call", {})
@@ -561,7 +561,7 @@ def customer_call_started():
         return jsonify({"context": ""}), 200
 
 
-@app.route("/api/vapi/call-ended", methods=["POST"])
+@app.route("/api/vapi/call-ended", methods=["POST", "GET"])
 def customer_call_ended():
     data = request.json
     call = data.get("call", {})

@@ -340,74 +340,9 @@ def api_stripe_webhook():
 # =============================================================================
 # ONBOARDING
 # =============================================================================
-@app.route("/api/vapi/call-started", methods=["POST", "GET"])
-def customer_call_started():
-    if request.method == "GET":
-        return jsonify({"status": "webhook ready"}), 200
-    
-    data = request.get_json(force=True, silent=True) or {}
-    call = data.get("call", {})
-    to_number = call.get("phoneNumberId")
-    from_number = call.get("customer", {}).get("number")
-
-    if not to_number or not from_number:
-        return jsonify({}), 200
-
-    owner = DB.find_one("business_owners", {"vapi_phone_number": to_number})
-    if not owner:
-        return jsonify({}), 200
-
-    customer = DB.find_one("their_customers", {"business_owner_id": owner["id"], "phone_number": from_number})
-    
-    if not customer:
-        return jsonify({"messages": [{"role": "system", "content": f"NEW customer: {from_number}"}]}), 200
-
-    past_calls = DB.find_many("interactions", where={"customer_id": customer["id"]}, order_by="created_at DESC", limit=1)
-    
-    context = f"RETURNING: {from_number}. Calls: {customer.get('total_calls', 0)}"
-    if past_calls:
-        context += f". Last: {past_calls[0].get('summary', '')[:100]}"
-    
-    return jsonify({"messages": [{"role": "system", "content": context}]}), 200
 
 
-@app.route("/api/vapi/call-ended", methods=["POST", "GET"])
-def customer_call_ended():
-    if request.method == "GET":
-        return jsonify({"status": "webhook ready"}), 200
-    
-    data = request.get_json(force=True, silent=True) or {}
-    call = data.get("call", {})
-    to_number = call.get("phoneNumberId")
-    from_number = call.get("customer", {}).get("number")
-    transcript = data.get("transcript", "")
-    duration = call.get("duration", 0)
 
-    owner = DB.find_one("business_owners", {"vapi_phone_number": to_number})
-    if not owner:
-        return jsonify({}), 200
-
-    customer = DB.find_one("their_customers", {"business_owner_id": owner["id"], "phone_number": from_number})
-    
-    if customer:
-        DB.update("their_customers", {"id": customer["id"]}, {"total_calls": customer.get("total_calls", 0) + 1})
-        customer_id = customer["id"]
-    else:
-        new = DB.insert("their_customers", {"business_owner_id": owner["id"], "phone_number": from_number, "total_calls": 1})
-        customer_id = new["id"]
-
-    DB.insert("interactions", {
-        "business_owner_id": owner["id"],
-        "customer_id": customer_id,
-        "type": "inbound_call",
-        "caller_phone": from_number,
-        "call_duration": duration,
-        "transcript": transcript,
-        "summary": transcript[:200],
-        "is_emergency": any(k in transcript.lower() for k in ["burst", "leak", "emergency", "urgent"])
-    })
-
-    return jsonify({"status": "success"}), 200
 
 
 # =============================================================================

@@ -466,62 +466,123 @@ Referral: {referral_code}""",
 # VAPI WEBHOOKS (unchanged)
 # =============================================================================
 
-@app.route("/api/vapi/call-ended", methods=["POST", "GET"])
-def customer_call_ended():
+# =============================================================================
+# CALL FORWARDING TOGGLE
+# =============================================================================
+@app.route("/api/customer/call-forwarding", methods=["GET", "POST"])
+def call_forwarding_toggle():
+    owner, err = require_app_auth()
+    if err:
+        return err
+
+    ok, msg = subscription_gate(owner)
+    if not ok:
+        return jsonify({"error": msg, "needs_payment": True}), 402
+
     if request.method == "GET":
-        return "Webhook ready"
-    
-    data = request.get_json(silent=True) or {}
-    message = data.get("message", {})
-    call = message.get("call", {})
-    phoneNumber = message.get("phoneNumber", {})
-    
-    # ✅ GET UNIQUE CALL ID
-    vapi_call_id = call.get("id")  # e.g., "019bb0c0-8818-7ee2-923e-f6056d280354"
-    
-    to_number = phoneNumber.get("number")
-    from_number = call.get("customer", {}).get("number")
-    transcript = message.get("transcript", "")
-    duration = int(message.get("durationSeconds", 0))
-    recording_url = message.get("recordingUrl", "")
+        return jsonify({
+            "enabled": owner.get("call_forwarding_enabled", False),
+            "forwarding_number": owner.get("forwarding_number", ""),
+            "vapi_number": owner.get("vapi_phone_number", "")
+        }), 200
 
-    if not to_number or not from_number or not vapi_call_id:
-        return jsonify({"status": "ok"}), 200
+    # POST - Update settings
+    data = request.json or {}
+    enabled = data.get("enabled", False)
+    forwarding_number = data.get("forwarding_number", "")
 
-    # ✅ CHECK IF ALREADY PROCESSED
-    existing = DB.find_one("interactions", {"vapi_call_id": vapi_call_id})
-    if existing:
-        logger.info(f"Call {vapi_call_id} already processed - skipping")
-        return jsonify({"status": "duplicate"}), 200
-
-    owner = DB.find_one("business_owners", {"vapi_phone_number": to_number})
-    if not owner:
-        return jsonify({"status": "ok"}), 200
-
-    customer = DB.find_one("their_customers", {"business_owner_id": owner["id"], "phone_number": from_number})
-    
-    if customer:
-        DB.update("their_customers", {"id": customer["id"]}, {"total_calls": customer.get("total_calls", 0) + 1})
-        customer_id = customer["id"]
-    else:
-        new = DB.insert("their_customers", {"business_owner_id": owner["id"], "phone_number": from_number, "total_calls": 1})
-        customer_id = new["id"]
-
-    # ✅ STORE WITH UNIQUE ID
-    DB.insert("interactions", {
-        "vapi_call_id": vapi_call_id,  # ← ADD THIS
-        "business_owner_id": owner["id"],
-        "customer_id": customer_id,
-        "caller_phone": from_number,
-        "call_duration": duration,
-        "recording_url": recording_url,
-        "transcript": transcript,
-        "summary": transcript[:200],
-        "is_emergency": any(k in transcript.lower() for k in ["burst", "leak", "emergency", "urgent"])
+    DB.update("business_owners", {"id": owner["id"]}, {
+        "call_forwarding_enabled": enabled,
+        "forwarding_number": forwarding_number
     })
 
-    return jsonify({"status": "success"}), 200
+    return jsonify({"status": "updated", "enabled": enabled}), 200
 
+
+# =============================================================================
+# BOOKINGS API
+# =============================================================================
+@app.route("/api/customer/bookings", methods=["GET"])
+def get_bookings():
+    owner, err = require_app_auth()
+    if err:
+        return err
+
+    ok, msg = subscription_gate(owner)
+    if not ok:
+        return jsonify({"error": msg, "needs_payment": True}), 402
+
+    try:
+        bookings = DB.find_many(
+            "bookings",
+            where={"business_owner_id": owner["id"]},
+            order_by="booking_date ASC",
+            limit=100
+        )
+        return jsonify(bookings), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/vapi/create-booking", methods=["POST"])
+def vapi_create_booking():
+    """VAPI calls this when customer books appointment"""
+    data = request.get_json(silent=True) or {}
+    
+    customer_phone = data.get("customer_phone")
+    booking_date = data.get("booking_date")
+    booking_time = data.get("booking_time")
+    customer_name = data.get("customer_name", "Unknown")
+    service_type = data.get("service_type", "General")
+    notes = data.get("notes", "")
+    
+    # Get context from VAPI
+    call_data = data.get("call", {})
+    phoneNumberId = call_data.get("phoneNumberId")
+    
+    if not phoneNumberId:
+        return jsonify({"error": "No phone context"}), 400
+    
+    owner = DB.find_one("business_owners", {"vapi_phone_number": phoneNumberId})
+    if not owner:
+        return jsonify({"error": "Owner not found"}), 404
+    
+    # Find/create customer
+    customer = DB.find_one("their_customers", {
+        "business_owner_id": owner["id"],
+        "phone_number": customer_phone
+    })
+    if not customer:
+        customer = DB.insert("their_customers", {
+            "business_owner_id": owner["id"],
+            "phone_number": customer_phone,
+            "name": customer_name,
+            "total_calls": 0
+        })
+    
+    # Create booking
+    booking = DB.insert("bookings", {
+        "business_owner_id": owner["id"],
+        "customer_id": customer["id"],
+        "customer_name": customer_name,
+        "customer_phone": customer_phone,
+        "booking_date": booking_date,
+        "booking_time": booking_time,
+        "service_type": service_type,
+        "notes": notes,
+        "status": "pending"
+    })
+    
+    # Notify owner
+    send_sms(
+        to=owner["phone_number"],
+        message=f"📅 NEW BOOKING\n{customer_name}\n{booking_date} at {booking_time}\n{service_type}"
+    )
+    
+    return jsonify({
+        "success": True,
+        "message": f"Booking confirmed for {booking_date} at {booking_time}"
+    }), 200
 
 @app.route("/api/vapi/call-started", methods=["POST", "GET"])
 def customer_call_started():
@@ -543,18 +604,149 @@ def customer_call_started():
     if not owner:
         return jsonify({}), 200
 
-    customer = DB.find_one("their_customers", {"business_owner_id": owner["id"], "phone_number": from_number})
+    # Skip if owner calling themselves
+    if from_number == owner.get("phone_number"):
+        return jsonify({
+            "messages": [{
+                "role": "system",
+                "content": "OWNER TESTING - This is a test call from the business owner"
+            }]
+        }), 200
+
+    # Get customer history
+    customer = DB.find_one("their_customers", {
+        "business_owner_id": owner["id"],
+        "phone_number": from_number
+    })
     
     if not customer:
-        return jsonify({"messages": [{"role": "system", "content": f"NEW customer: {from_number}"}]}), 200
+        return jsonify({
+            "messages": [{
+                "role": "system",
+                "content": f"NEW customer calling from {from_number}. First interaction."
+            }]
+        }), 200
 
-    past_calls = DB.find_many("interactions", where={"customer_id": customer["id"]}, order_by="created_at DESC", limit=1)
+    # Get past calls
+    past_calls = DB.find_many(
+        "interactions",
+        where={"customer_id": customer["id"]},
+        order_by="created_at DESC",
+        limit=3
+    )
     
-    context = f"RETURNING: {from_number}. Calls: {customer.get('total_calls', 0)}"
+    # Get upcoming bookings
+    bookings = DB.find_many(
+        "bookings",
+        where={"customer_id": customer["id"], "status": "pending"},
+        order_by="booking_date ASC",
+        limit=5
+    )
+    
+    # Build context
+    context = f"RETURNING CUSTOMER: {customer.get('name', 'Customer')}\n"
+    context += f"Phone: {from_number}\n"
+    context += f"Total previous calls: {customer.get('total_calls', 0)}\n\n"
+    
     if past_calls:
-        context += f". Last: {past_calls[0].get('summary', '')[:100]}"
+        context += "RECENT CALLS:\n"
+        for call in past_calls:
+            date = str(call.get("created_at", ""))[:10]
+            summary = call.get("summary", "No details")[:80]
+            context += f"- {date}: {summary}\n"
     
-    return jsonify({"messages": [{"role": "system", "content": context}]}), 200
+    if bookings:
+        context += "\nUPCOMING BOOKINGS:\n"
+        for booking in bookings:
+            context += f"- {booking['booking_date']} at {booking['booking_time']}: {booking.get('service_type', 'Service')}\n"
+    
+    context += "\nProvide personalized service based on their history."
+    
+    return jsonify({
+        "messages": [{
+            "role": "system",
+            "content": context
+        }]
+    }), 200
+
+
+@app.route("/api/vapi/call-ended", methods=["POST", "GET"])
+def customer_call_ended():
+    if request.method == "GET":
+        return "Webhook ready"
+    
+    data = request.get_json(silent=True) or {}
+    message = data.get("message", {})
+    call = message.get("call", {})
+    phoneNumber = message.get("phoneNumber", {})
+    
+    vapi_call_id = call.get("id")
+    to_number = phoneNumber.get("number")
+    from_number = call.get("customer", {}).get("number")
+    transcript = message.get("transcript", "")
+    duration = int(message.get("durationSeconds", 0))
+    recording_url = message.get("recordingUrl", "")
+
+    if not to_number or not from_number or not vapi_call_id:
+        return jsonify({"status": "ok"}), 200
+
+    # Check duplicate
+    existing = DB.find_one("interactions", {"vapi_call_id": vapi_call_id})
+    if existing:
+        return jsonify({"status": "duplicate"}), 200
+
+    owner = DB.find_one("business_owners", {"vapi_phone_number": to_number})
+    if not owner:
+        return jsonify({"status": "ok"}), 200
+
+    # Skip owner's test calls
+    if from_number == owner.get("phone_number"):
+        return jsonify({"status": "owner_test"}), 200
+
+    # Find/create customer
+    customer = DB.find_one("their_customers", {
+        "business_owner_id": owner["id"],
+        "phone_number": from_number
+    })
+    
+    if customer:
+        DB.update("their_customers", {"id": customer["id"]}, {
+            "total_calls": customer.get("total_calls", 0) + 1
+        })
+        customer_id = customer["id"]
+    else:
+        new = DB.insert("their_customers", {
+            "business_owner_id": owner["id"],
+            "phone_number": from_number,
+            "total_calls": 1
+        })
+        customer_id = new["id"]
+
+    # Detect booking/emergency
+    booking_keywords = ["book", "appointment", "schedule", "reserve"]
+    is_booking = any(kw in transcript.lower() for kw in booking_keywords)
+    
+    emergency_keywords = ["burst", "leak", "emergency", "urgent", "flooding"]
+    is_emergency = any(kw in transcript.lower() for kw in emergency_keywords)
+
+    # Save interaction
+    DB.insert("interactions", {
+        "vapi_call_id": vapi_call_id,
+        "business_owner_id": owner["id"],
+        "customer_id": customer_id,
+        "type": "booking" if is_booking else "inbound_call",
+        "caller_phone": from_number,
+        "call_duration": duration,
+        "recording_url": recording_url,
+        "transcript": transcript,
+        "summary": transcript[:200],
+        "is_emergency": is_emergency,
+    })
+
+    if is_emergency:
+        send_sms(to=owner["phone_number"], message=f"🚨 EMERGENCY: {transcript[:100]}")
+
+    return jsonify({"status": "success"}), 200
 
 # =============================================================================
 # CUSTOMER APIs (auth + subscription gate)

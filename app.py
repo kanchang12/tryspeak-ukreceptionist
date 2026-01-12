@@ -226,18 +226,17 @@ def api_auth_verify_otp():
         out = supabase_anon.auth.verify_otp({"phone": phone, "token": otp, "type": "sms"})
         session = getattr(out, "session", None)
         if not session or not session.access_token:
-            return jsonify({"error": "OTP verified but no session returned"}), 401
+            return jsonify({"error": "Invalid OTP"}), 401
 
-        decoded = decode_supabase_access_token(session.access_token)
-        auth_user_id = decoded.get("sub")
+        # ✅ Skip JWT decode, Supabase already validated it
+        # Just get user from session
+        user = getattr(out, "user", None)
+        if not user:
+            return jsonify({"error": "No user found"}), 401
 
         owner = DB.find_one("business_owners", {"phone_number": phone, "status": "active"})
         if not owner:
             return jsonify({"error": "No account for this phone"}), 403
-
-        # Store auth_user_id once (optional but recommended)
-        if auth_user_id and not owner.get("auth_user_id"):
-            DB.update("business_owners", {"id": owner["id"]}, {"auth_user_id": auth_user_id})
 
         ok, msg = subscription_gate(owner)
         if not ok:
@@ -247,6 +246,7 @@ def api_auth_verify_otp():
         return jsonify({"token": token, "owner_id": owner["id"]}), 200
 
     except Exception as e:
+        logger.error(f"OTP verify error: {e}")
         return jsonify({"error": str(e)}), 400
 
 

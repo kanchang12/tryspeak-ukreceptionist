@@ -40,6 +40,12 @@ import stripe
 from supabase import create_client
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 
+import logging
+from services.sms_service import send_sms
+from services.vapi_service import create_vapi_assistant, generate_assistant_prompt
+
+logger = logging.getLogger(__name__)
+
 load_dotenv()
 
 app = Flask(__name__)
@@ -629,6 +635,7 @@ def customer_call_ended():
 # CUSTOMER APIs (auth + subscription gate)
 # =============================================================================
 @app.route("/api/customer/dashboard", methods=["GET"])
+@app.route("/api/customer/dashboard", methods=["GET"])
 def get_customer_dashboard():
     owner, err = require_app_auth()
     if err:
@@ -639,29 +646,37 @@ def get_customer_dashboard():
         return jsonify({"error": msg, "needs_payment": True}), 402
 
     try:
-        stats = DB.query(
-            """SELECT
-                COUNT(*) as total,
-                SUM(CASE WHEN is_emergency THEN 1 ELSE 0 END) as emergencies,
-                SUM(CASE WHEN type = 'booking' THEN 1 ELSE 0 END) as bookings
-               FROM interactions
-               WHERE business_owner_id = %s
-               AND created_at >= CURRENT_DATE""",
-            [owner["id"]],
-        )[0]
+        # ✅ Use Supabase filters instead of broken raw SQL
+        today = datetime.utcnow().date().isoformat()
+        
+        # Get all interactions for this owner
+        interactions = DB.find_many(
+            "interactions",
+            where={"business_owner_id": owner["id"]},
+            order_by="created_at DESC",
+            limit=100
+        )
+        
+        # Filter today's calls in Python
+        today_calls = [i for i in interactions if i.get("created_at", "").startswith(today)]
+        
+        calls_today = len(today_calls)
+        emergencies_today = sum(1 for i in today_calls if i.get("is_emergency"))
+        bookings_today = sum(1 for i in today_calls if i.get("type") == "booking")
 
-        return jsonify(
-            {
-                "calls_today": stats["total"],
-                "emergencies_today": stats["emergencies"],
-                "bookings_today": stats["bookings"],
-                "business_name": owner.get("business_name") or "Your Business",
-                "subscription_status": owner.get("subscription_status") or "trialing",
-                "trial_ends_at": owner.get("trial_ends_at"),
-            }
-        ), 200
+        return jsonify({
+            "calls_today": calls_today,
+            "emergencies_today": emergencies_today,
+            "bookings_today": bookings_today,
+            "business_name": owner.get("business_name") or "Your Business",
+            "vapi_phone_number": owner.get("vapi_phone_number"),  # ← ADD THIS
+            "referral_code": owner.get("referral_code"),  # ← ADD THIS
+            "subscription_status": owner.get("subscription_status") or "trialing",
+            "trial_ends_at": owner.get("trial_ends_at"),
+        }), 200
 
     except Exception as e:
+        logger.error(f"Dashboard error: {e}")
         return jsonify({"error": str(e)}), 500
 
 

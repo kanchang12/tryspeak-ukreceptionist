@@ -1,6 +1,15 @@
 flask
+flask-cors
 flask-sock
-google-genai
+python-dotenv
+PyJWT
+stripe
+supabase
+itsdangerous
+google-generativeai
+google-cloud-speech
 elevenlabs
+twilio
 gunicorn
 gevent
+requests

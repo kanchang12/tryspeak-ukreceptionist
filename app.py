@@ -19,7 +19,8 @@ from threading import Thread
 import queue
 
 # Google services
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from google.cloud import speech_v1 as speech
 
 # ElevenLabs
@@ -63,7 +64,7 @@ TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 
 # Initialize services
-genai.configure(api_key=GEMINI_API_KEY)
+gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 elevenlabs_client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
 
 # Julian voice ID (British male)
@@ -299,15 +300,32 @@ TONE: Professional, warm, British accent. Keep responses under 3 sentences.
     async def get_gemini_response(self, user_text):
         """Get response from Gemini"""
         try:
-            model = genai.GenerativeModel('gemini-2.0-flash-exp')
+            # Build conversation with system prompt first
+            contents = [types.Content(
+                role="user",
+                parts=[types.Part(text=self.get_system_prompt())]
+            )]
             
-            # Build conversation context
-            messages = [{"role": "user", "parts": [self.get_system_prompt()]}]
-            for msg in self.conversation_history[-10:]:  # Last 10 messages
-                messages.append({"role": msg["role"], "parts": [msg["content"]]})
-            messages.append({"role": "user", "parts": [user_text]})
+            # Add conversation history (last 10 messages)
+            for msg in self.conversation_history[-10:]:
+                role = "model" if msg["role"] == "assistant" else "user"
+                contents.append(types.Content(
+                    role=role,
+                    parts=[types.Part(text=msg["content"])]
+                ))
             
-            response = model.generate_content(messages)
+            # Add current user message
+            contents.append(types.Content(
+                role="user",
+                parts=[types.Part(text=user_text)]
+            ))
+            
+            # Generate response
+            response = gemini_client.models.generate_content(
+                model='gemini-2.0-flash-exp',
+                contents=contents
+            )
+            
             ai_text = response.text
             
             self.conversation_history.append({"role": "user", "content": user_text})
@@ -973,5 +991,5 @@ def health():
     return jsonify({"status": "healthy"}), 200
 
 if __name__ == "__main__":
-    port = 5000
+    port = int(os.getenv("PORT", 5000))
     app.run(debug=False, host="0.0.0.0", port=port)

@@ -17,6 +17,6 @@ elevenlabs==1.0.0
 
 # Twilio
 twilio==8.11.0
-
+gunicorn
 # Audio processing
 pydub==0.25.1

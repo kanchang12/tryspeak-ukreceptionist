@@ -1,98 +1,65 @@
-import requests
 import os
+import requests
+import logging
 
-VAPI_API_KEY = os.getenv('VAPI_API_KEY')
+logger = logging.getLogger(__name__)
+
+VAPI_API_KEY = os.getenv("VAPI_API_KEY")
 VAPI_BASE_URL = "https://api.vapi.ai"
-BACKEND_URL = os.getenv('BACKEND_URL', 'http://localhost:5000')
 
-
-def create_vapi_assistant(name, system_prompt, voice_id):
-    """
-    Creates a new VAPI assistant with phone number
-    """
+def create_vapi_assistant(name: str, system_prompt: str, voice_id: str) -> dict:
+    """Create VAPI assistant and return {id, phoneNumber}"""
+    if not VAPI_API_KEY:
+        raise Exception("VAPI_API_KEY not configured")
+    
     headers = {
         "Authorization": f"Bearer {VAPI_API_KEY}",
         "Content-Type": "application/json"
     }
     
-    # Create assistant
-    assistant_payload = {
+    assistant_data = {
         "name": name,
-        "voice": {
-            "provider": "elevenlabs",
-            "voiceId": voice_id
-        },
         "model": {
             "provider": "openai",
-            "model": "gpt-4o",
-            "messages": [
-                {
-                    "role": "system",
-                    "content": system_prompt
-                }
-            ]
+            "model": "gpt-4",
+            "messages": [{"role": "system", "content": system_prompt}]
         },
-        "firstMessage": "Good morning, thanks for calling. How can I help you today?",
-        "endCallMessage": "Brilliant, we'll be in touch. Have a lovely day!",
-        "serverUrl": f"{BACKEND_URL}/api/vapi/call-started",
-        "endCallFunctionEnabled": True
+        "voice": {
+            "provider": "11labs",
+            "voiceId": voice_id
+        }
     }
     
     response = requests.post(
         f"{VAPI_BASE_URL}/assistant",
         headers=headers,
-        json=assistant_payload
+        json=assistant_data
     )
     response.raise_for_status()
-    
     assistant = response.json()
     
-    # Provision phone number for this assistant
-    phone_payload = {
-        "assistantId": assistant['id'],
-        "provider": "vapi"  # Use VAPI's built-in Twilio
+    phone_data = {
+        "assistantId": assistant["id"],
+        "name": f"{name} Phone"
     }
     
     phone_response = requests.post(
         f"{VAPI_BASE_URL}/phone-number",
         headers=headers,
-        json=phone_payload
+        json=phone_data
     )
     phone_response.raise_for_status()
+    phone = phone_response.json()
     
-    phone_data = phone_response.json()
-    assistant['phoneNumber'] = phone_data.get('number', phone_data.get('phoneNumber'))
-    
-    return assistant
-
-
-def update_vapi_assistant(assistant_id, system_prompt):
-    """
-    Updates an existing assistant's prompt
-    """
-    headers = {
-        "Authorization": f"Bearer {VAPI_API_KEY}",
-        "Content-Type": "application/json"
+    return {
+        "id": assistant["id"],
+        "phoneNumber": phone.get("number", "")
     }
-    
-    payload = {
-        "model": {
-            "provider": "openai",
-            "model": "gpt-4o",
-            "messages": [
-                {
-                    "role": "system",
-                    "content": system_prompt
-                }
-            ]
-        }
-    }
-    
-    response = requests.patch(
-        f"{VAPI_BASE_URL}/assistant/{assistant_id}",
-        headers=headers,
-        json=payload
-    )
-    response.raise_for_status()
-    
-    return response.json()
+
+def generate_assistant_prompt(transcript: str, business_type: str, business_name: str) -> str:
+    """Generate system prompt from onboarding transcript"""
+    return f"""You are a professional AI receptionist for {business_name}, a {business_type} business.
+
+Based on onboarding: {transcript[:300]}
+
+Handle calls professionally, take bookings, identify emergencies."""

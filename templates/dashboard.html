@@ -727,88 +727,93 @@
             }
         }
 
-        async function loadRecentCalls(limit = 100) {
-            try {
-                const calls = await apiCall(`/api/customer/calls?limit=${limit}`);
-                if (!calls) return;
+      async function loadRecentCalls(limit = 100) {
+    try {
+        const calls = await apiCall(`/api/customer/calls?limit=${limit}`);
+        if (!calls) return;
 
-                allCalls = calls;
+        allCalls = calls;
+        const container = document.getElementById('recentCalls');
 
-                const container = document.getElementById('recentCalls');
+        if (!calls || calls.length === 0) {
+            container.innerHTML = '<div class="empty-state">No calls yet</div>';
+            return;
+        }
 
-                if (!calls || calls.length === 0) {
-                    container.innerHTML = '<div class="empty-state">No calls yet</div>';
-                    return;
-                }
+        const displayCalls = showingAll ? calls : calls.slice(0, 5);
 
-                const uniquePhones = new Set(calls.map(c => c.caller_phone));
-                document.getElementById('totalCustomers').textContent = uniquePhones.size;
-
-                const now = new Date();
-                const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-                const weekCalls = calls.filter(c => new Date(c.created_at) >= weekAgo);
-                
-                document.getElementById('weekCalls').textContent = weekCalls.length;
-                document.getElementById('weekBookings').textContent = 
-                    weekCalls.filter(c => c.type === 'booking').length;
-                
-                const avgDuration = weekCalls.reduce((sum, c) => sum + (c.call_duration || 0), 0) / (weekCalls.length || 1);
-                document.getElementById('avgDuration').textContent = formatDuration(Math.round(avgDuration));
-
-                const displayCalls = showingAll ? calls : calls.slice(0, 5);
-
-                container.innerHTML = displayCalls.map(call => `
-                    <div class="call-item">
-                        <div class="d-flex justify-content-between align-items-start">
-                            <div style="flex: 1;">
-                                <div class="call-phone">${call.caller_phone || 'Unknown'}</div>
-                                <div class="call-time">
-                                    ${formatDate(call.created_at)} • ${formatDuration(call.call_duration)}
-                                </div>
-                                ${call.summary ? `<div class="call-summary-text">${escapeHtml(call.summary)}</div>` : ''}
+        container.innerHTML = displayCalls.map(call => {
+            // Check for different possible summary keys
+            const summaryText = call.summary || call.call_summary || call.transcript_summary || "";
+            
+            return `
+                <div class="call-item">
+                    <div class="d-flex justify-content-between align-items-start">
+                        <div style="flex: 1;">
+                            <div class="call-phone">${call.caller_phone || 'Unknown'}</div>
+                            <div class="call-time">
+                                ${formatDate(call.created_at)} • ${formatDuration(call.call_duration)}
                             </div>
-                            <span class="badge badge-${getBadgeType(call)}">
-                                ${getBadgeText(call)}
-                            </span>
+                            ${summaryText ? `<div class="call-summary-text" style="background: #fdfdfd; padding: 8px; border-radius: 4px; margin-top: 8px; border-left: 2px solid #FCD34D;">${escapeHtml(summaryText)}</div>` : '<div class="call-summary-text text-muted"><em>No summary available</em></div>'}
                         </div>
+                        <span class="badge badge-${getBadgeType(call)}">
+                            ${getBadgeText(call)}
+                        </span>
                     </div>
-                `).join('');
+                </div>
+            `;
+        }).join('');
 
-                renderCalendar();
+        renderCalendar();
+    } catch (error) {
+        console.error('Error loading calls:', error);
+    }
+}
 
-            } catch (error) {
-                console.error('Error loading calls:', error);
-            }
+      async function loadBookings() {
+    try {
+        const bookings = await apiCall('/api/customer/bookings');
+        if (!bookings) return;
+        
+        allBookings = bookings;
+        const container = document.getElementById('nextAppointments');
+        
+        if (bookings.length === 0) {
+            container.innerHTML = '<div class="empty-state">No upcoming bookings</div>';
+            renderCalendar();
+            return;
         }
+        
+        container.innerHTML = bookings.slice(0, 5).map((booking, index) => `
+            <div class="appointment-item" onclick="showBookingDetails(${index})" style="cursor: pointer; transition: transform 0.1s;" onmouseover="this.style.transform='scale(1.02)'" onmouseout="this.style.transform='scale(1)'">
+                <div class="appointment-time">${booking.booking_date} at ${booking.booking_time}</div>
+                <div class="appointment-title">${booking.service_type || 'Appointment'}</div>
+                <div class="appointment-phone">${booking.customer_name || booking.customer_phone}</div>
+                <small class="text-primary">Click for details →</small>
+            </div>
+        `).join('');
 
-        async function loadBookings() {
-            try {
-                const bookings = await apiCall('/api/customer/bookings');
-                if (!bookings) return;
-                
-                allBookings = bookings;
-                const container = document.getElementById('nextAppointments');
-                
-                if (bookings.length === 0) {
-                    container.innerHTML = '<div class="empty-state">No upcoming bookings</div>';
-                    renderCalendar();
-                    return;
-                }
-                
-                container.innerHTML = bookings.slice(0, 5).map(booking => `
-                    <div class="appointment-item">
-                        <div class="appointment-time">${booking.booking_date} at ${booking.booking_time}</div>
-                        <div class="appointment-title">${booking.service_type || 'Appointment'}</div>
-                        <div class="appointment-phone">${booking.customer_name || booking.customer_phone}</div>
-                    </div>
-                `).join('');
+        renderCalendar();
+    } catch (error) {
+        console.error('Bookings error:', error);
+    }
+}
 
-                renderCalendar();
-            } catch (error) {
-                console.error('Bookings error:', error);
-            }
-        }
-
+// New function to show booking details
+function showBookingDetails(index) {
+    const b = allBookings[index];
+    const details = `
+        BOOKING DETAILS
+        ----------------
+        Customer: ${b.customer_name || 'Not provided'}
+        Phone: ${b.customer_phone}
+        Service: ${b.service_type || 'General'}
+        Date: ${b.booking_date}
+        Time: ${b.booking_time}
+        Notes: ${b.notes || 'No extra notes provided.'}
+    `;
+    alert(details);
+}
         function renderCalendar() {
             const year = currentDate.getFullYear();
             const month = currentDate.getMonth();

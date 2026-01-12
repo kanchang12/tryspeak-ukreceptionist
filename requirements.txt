@@ -1,22 +1,6 @@
-Flask==3.0.0
-flask-cors==4.0.0
-flask-sock==0.7.0
-python-dotenv==1.0.0
-PyJWT==2.8.0
-stripe==7.8.0
-supabase==2.10.0
-itsdangerous==2.1.2
-requests==2.31.0
-
-# Google Cloud
-google-generativeai==0.3.2
-google-cloud-speech==2.23.0
-
-# ElevenLabs
-elevenlabs==1.0.0
-
-# Twilio
-twilio==8.11.0
-
-# Audio processing
-pydub==0.25.1
+flask
+flask-sock
+google-genai
+elevenlabs
+gunicorn
+gevent

@@ -14,12 +14,7 @@ SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
 supabase: Client = None
 supabase_admin: Client = None
 
-try:
-    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-    supabase_admin = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-    logger.info("Supabase connected successfully")
-except Exception as e:
-    logger.error(f"Supabase init failed: {e}")
+
 
 def init_db():
     """Tables are already created via SQL in Supabase dashboard - this is a no-op"""

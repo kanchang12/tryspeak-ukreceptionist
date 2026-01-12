@@ -478,39 +478,63 @@ def twilio_stream(ws):
     handler = None
     start_time = datetime.utcnow()
     
-    logger.info("WebSocket connected")
+    logger.info("="*50)
+    logger.info("WebSocket connected - waiting for messages")
+    logger.info("="*50)
     
     try:
         while True:
-            message = ws.receive()
-            if not message:
+            try:
+                message = ws.receive()
+                logger.info(f"WebSocket received message type: {type(message)}")
+                
+                if not message:
+                    logger.warning("WebSocket received empty message - breaking")
+                    break
+                
+                logger.info(f"Raw message length: {len(message) if message else 0}")
+                data = json.loads(message)
+                event = data.get("event")
+                logger.info(f"Event type: {event}")
+                
+            except Exception as e:
+                logger.error(f"Error receiving/parsing message: {e}", exc_info=True)
                 break
             
-            data = json.loads(message)
-            event = data.get("event")
-            
             if event == "start":
+                logger.info("Processing 'start' event")
                 call_sid = data["start"]["callSid"]
+                logger.info(f"Call SID: {call_sid}")
+                
                 custom_params = data["start"].get("customParameters", {})
+                logger.info(f"Custom params: {custom_params}")
+                
                 from_number = custom_params.get("from_number")
                 to_number = custom_params.get("to_number")
                 
                 logger.info(f"Call params - From: {from_number}, To: {to_number}, SID: {call_sid}")
                 
+                if not from_number or not to_number:
+                    logger.error(f"Missing phone numbers! From: {from_number}, To: {to_number}")
+                
                 handler = VoiceCallHandler(call_sid, from_number, to_number)
-                logger.info(f"Call started: {call_sid}")
+                logger.info(f"VoiceCallHandler created for call: {call_sid}")
                 
                 # Don't send greeting yet - wait for first audio from caller
             
             elif event == "media" and handler:
+                logger.info("Processing 'media' event - incoming audio")
                 # Incoming audio from caller
                 payload = data["media"]["payload"]
                 audio_data = base64.b64decode(payload)
+                logger.info(f"Audio data size: {len(audio_data)} bytes")
                 
                 # Process speech asynchronously
+                logger.info("Starting speech processing...")
                 loop = asyncio.new_event_loop()
                 response_audio = loop.run_until_complete(handler.process_speech(audio_data))
                 loop.close()
+                logger.info(f"Speech processing complete. Response audio: {len(response_audio) if response_audio else 0} bytes")
                 
                 if response_audio:
                     audio_base64 = base64.b64encode(response_audio).decode('utf-8')
@@ -518,18 +542,26 @@ def twilio_stream(ws):
                         "event": "media",
                         "media": {"payload": audio_base64}
                     }))
+                    logger.info("Response audio sent to caller")
             
             elif event == "stop":
+                logger.info("Processing 'stop' event - call ending")
                 if handler:
                     duration = int((datetime.utcnow() - start_time).total_seconds())
+                    logger.info(f"Saving call log. Duration: {duration}s")
                     handler.save_call_log(duration)
                 logger.info(f"Call ended: {call_sid}")
                 break
                 
     except Exception as e:
-        logger.error(f"WebSocket error: {e}")
+        logger.error(f"WebSocket error: {e}", exc_info=True)
     finally:
-        ws.close()
+        logger.info(f"WebSocket closing for call: {call_sid}")
+        try:
+            ws.close()
+        except:
+            pass
+        logger.info("WebSocket closed")
 
 # =============================================================================
 # ALL OTHER ROUTES (Same as original app.py)

@@ -468,17 +468,21 @@ Referral: {referral_code}""",
 
 @app.route("/api/vapi/call-ended", methods=["POST", "GET"])
 def customer_call_ended():
-    # Handle browser GET requests
     if request.method == "GET":
-        return "Webhook endpoint ready", 200
+        return "Webhook ready"
     
-    # Handle VAPI POST webhooks
-    data = request.get_json(force=True, silent=True) or {}
-    call = data.get("call", {})
-    to_number = call.get("phoneNumberId")
-    from_number = call.get("customer", {}).get("number")
-    transcript = data.get("transcript", "")
-    duration = call.get("duration", 0)
+    data = request.get_json(silent=True) or {}
+    
+    # ✅ VAPI wraps everything in "message"
+    message = data.get("message", {})
+    call = message.get("call", {})
+    phoneNumber = message.get("phoneNumber", {})
+    
+    # Get actual phone number string
+    to_number = phoneNumber.get("number")  # "+447886074523"
+    from_number = call.get("customer", {}).get("number")  # "+447823656762"
+    transcript = message.get("transcript", "")
+    duration = int(message.get("durationSeconds", 0))
 
     if not to_number or not from_number:
         return jsonify({"status": "ok"}), 200
@@ -494,41 +498,40 @@ def customer_call_ended():
         customer_id = customer["id"]
     else:
         new = DB.insert("their_customers", {"business_owner_id": owner["id"], "phone_number": from_number, "total_calls": 1})
-        customer_id = new["id"] if new else None
+        customer_id = new["id"]
 
-    if customer_id:
-        DB.insert("interactions", {
-            "business_owner_id": owner["id"],
-            "customer_id": customer_id,
-            "type": "inbound_call",
-            "caller_phone": from_number,
-            "call_duration": duration,
-            "transcript": transcript,
-            "summary": transcript[:200],
-            "is_emergency": any(k in transcript.lower() for k in ["burst", "leak", "emergency", "urgent"])
-        })
+    DB.insert("interactions", {
+        "business_owner_id": owner["id"],
+        "customer_id": customer_id,
+        "caller_phone": from_number,
+        "call_duration": duration,
+        "transcript": transcript,
+        "summary": transcript[:200],
+        "is_emergency": any(k in transcript.lower() for k in ["burst", "leak", "emergency", "urgent"])
+    })
 
     return jsonify({"status": "success"}), 200
 
 
 @app.route("/api/vapi/call-started", methods=["POST", "GET"])
 def customer_call_started():
-    # Handle browser GET requests
     if request.method == "GET":
-        return "Webhook endpoint ready", 200
+        return "Webhook ready"
     
-    # Handle VAPI POST webhooks
-    data = request.get_json(force=True, silent=True) or {}
-    call = data.get("call", {})
-    to_number = call.get("phoneNumberId")
+    data = request.get_json(silent=True) or {}
+    message = data.get("message", {})
+    call = message.get("call", {})
+    phoneNumber = message.get("phoneNumber", {})
+    
+    to_number = phoneNumber.get("number")
     from_number = call.get("customer", {}).get("number")
 
     if not to_number or not from_number:
-        return jsonify({"status": "ok"}), 200
+        return jsonify({}), 200
 
     owner = DB.find_one("business_owners", {"vapi_phone_number": to_number})
     if not owner:
-        return jsonify({"status": "ok"}), 200
+        return jsonify({}), 200
 
     customer = DB.find_one("their_customers", {"business_owner_id": owner["id"], "phone_number": from_number})
     
@@ -542,7 +545,6 @@ def customer_call_started():
         context += f". Last: {past_calls[0].get('summary', '')[:100]}"
     
     return jsonify({"messages": [{"role": "system", "content": context}]}), 200
-
 
 # =============================================================================
 # CUSTOMER APIs (auth + subscription gate)

@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -15,42 +16,7 @@
             margin: 0;
             padding: 0;
         }
-        .call-ai-card {
-    background: linear-gradient(135deg, #10B981, #059669);
-    padding: 2rem;
-    border-radius: 12px;
-    box-shadow: 0 4px 20px rgba(16, 185, 129, 0.3);
-    margin-bottom: 2rem;
-    color: white;
-}
-
-.call-ai-label {
-    font-size: 16px;
-    font-weight: 600;
-    margin-bottom: 0.5rem;
-}
-
-.call-ai-subtitle {
-    font-size: 13px;
-    opacity: 0.9;
-}
-
-.call-ai-btn {
-    background: white;
-    border: none;
-    color: #10B981;
-    padding: 1rem 2rem;
-    border-radius: 8px;
-    font-weight: 700;
-    font-size: 16px;
-    cursor: pointer;
-}
-
-.call-ai-btn:hover {
-    transform: scale(1.05);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
-}
-        /* Navbar */
+        
         .navbar { 
             background: white; 
             padding: 1rem 0; 
@@ -80,14 +46,12 @@
             color: white;
         }
 
-        /* Container */
         .container { 
             max-width: 1400px; 
             padding: 2rem; 
             margin: 0 auto;
         }
 
-        /* Trial Banner */
         .trial-banner {
             background: linear-gradient(135deg, #FEF3C7, #FCD34D);
             padding: 1rem 2rem;
@@ -100,7 +64,6 @@
             align-items: center;
         }
 
-        /* Welcome */
         .welcome { 
             background: white; 
             padding: 2rem; 
@@ -119,7 +82,6 @@
             margin: 0; 
         }
 
-        /* VAPI Phone Number Card */
         .phone-card {
             background: linear-gradient(135deg, #F59E0B, #FBBF24);
             padding: 2rem;
@@ -138,7 +100,7 @@
             font-size: 36px;
             font-weight: 700;
             letter-spacing: 2px;
-            margin-bottom: 0.25rem;
+            margin-bottom: 0.5rem;
             font-family: 'Courier New', monospace;
         }
         .phone-subtitle {
@@ -146,22 +108,96 @@
             opacity: 0.85;
             margin-bottom: 1rem;
         }
-        .copy-btn {
+        .phone-actions {
+            display: flex;
+            gap: 1rem;
+            flex-wrap: wrap;
+        }
+        .copy-btn, .call-btn {
             background: white;
             border: none;
-            color: #F59E0B;
-            padding: 0.175rem 1.5rem;
+            padding: 0.75rem 1.5rem;
             border-radius: 8px;
             font-weight: 600;
             cursor: pointer;
             transition: all 0.2s;
+            font-size: 15px;
         }
-        .copy-btn:hover {
+        .copy-btn {
+            color: #F59E0B;
+        }
+        .call-btn {
+            color: #10B981;
+        }
+        .copy-btn:hover, .call-btn:hover {
             transform: translateY(-2px);
             box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
         }
 
-        /* Stats Grid */
+        .forwarding-card {
+            background: white;
+            padding: 2rem;
+            border-radius: 12px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+            margin-bottom: 2rem;
+            border-left: 4px solid #8B5CF6;
+        }
+        .forwarding-label {
+            font-size: 16px;
+            font-weight: 600;
+            color: #111;
+            margin-bottom: 0.5rem;
+        }
+        .forwarding-subtitle {
+            font-size: 14px;
+            color: #6B7280;
+            font-weight: 600;
+        }
+        .forwarding-help {
+            font-size: 12px;
+            color: #9CA3AF;
+            margin-top: 0.25rem;
+        }
+        .toggle-switch {
+            position: relative;
+            display: inline-block;
+            width: 60px;
+            height: 34px;
+        }
+        .toggle-switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        .toggle-slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #10B981;
+            transition: 0.4s;
+            border-radius: 34px;
+        }
+        .toggle-slider:before {
+            position: absolute;
+            content: "";
+            height: 26px;
+            width: 26px;
+            left: 4px;
+            bottom: 4px;
+            background-color: white;
+            transition: 0.4s;
+            border-radius: 50%;
+        }
+        input:checked + .toggle-slider {
+            background-color: #F59E0B;
+        }
+        input:checked + .toggle-slider:before {
+            transform: translateX(26px);
+        }
+
         .stats { 
             display: grid; 
             grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); 
@@ -201,7 +237,6 @@
             font-size: 13px; 
         }
 
-        /* Grid Layout for Calendar + Appointments */
         .content-grid {
             display: grid;
             grid-template-columns: 1fr 1fr;
@@ -209,7 +244,6 @@
             margin-bottom: 2rem;
         }
 
-        /* Section */
         .section { 
             background: white; 
             padding: 2rem; 
@@ -225,7 +259,6 @@
             align-items: center;
         }
 
-        /* Calendar */
         .calendar {
             width: 100%;
         }
@@ -298,7 +331,6 @@
             color: #D1D5DB;
         }
 
-        /* Appointments */
         .appointment-item {
             padding: 1rem;
             border-left: 4px solid #2563EB;
@@ -322,7 +354,6 @@
             color: #6B7280;
         }
 
-        /* Call Summary */
         .summary-grid {
             display: grid;
             grid-template-columns: repeat(3, 1fr);
@@ -346,7 +377,6 @@
             margin-top: 0.25rem;
         }
 
-        /* Call List */
         .call-item { 
             padding: 1rem; 
             border-bottom: 1px solid #F3F4F6;
@@ -394,7 +424,6 @@
             color: #6B7280; 
         }
 
-        /* Empty State */
         .empty-state { 
             text-align: center; 
             padding: 2rem; 
@@ -407,7 +436,6 @@
             margin-bottom: 0.5rem;
         }
 
-        /* Loading */
         .loading { 
             text-align: center; 
             padding: 2rem; 
@@ -427,7 +455,6 @@
             100% { transform: rotate(360deg); }
         }
 
-        /* Responsive */
         @media (max-width: 1024px) {
             .content-grid {
                 grid-template-columns: 1fr;
@@ -437,11 +464,11 @@
             .phone-number { font-size: 24px; }
             .stats { grid-template-columns: 1fr 1fr; }
             .summary-grid { grid-template-columns: 1fr; }
+            .phone-actions { flex-direction: column; }
         }
     </style>
 </head>
 <body>
-    <!-- Navbar -->
     <nav class="navbar">
         <div class="container">
             <div class="d-flex justify-content-between align-items-center w-100">
@@ -454,26 +481,45 @@
     </nav>
 
     <div class="container">
-        <!-- Trial Banner -->
         <div id="trialBanner" style="display: none;"></div>
 
-        <!-- Welcome -->
         <div class="welcome">
             <h1 id="welcomeText">Welcome Back!</h1>
-            <p>Here's what's happening with your AI receptionist</p>
+            <p>Here's what's happening with your AI receptionist today</p>
         </div>
 
-        <!-- VAPI Phone Number -->
         <div class="phone-card">
             <div class="phone-label">📞 Your AI Receptionist Number</div>
             <div class="phone-number" id="vapiNumber">Loading...</div>
             <div class="phone-subtitle">Forward your business line to this number</div>
-            <button class="copy-btn" onclick="copyNumber()">
-                <i class="bi bi-clipboard"></i> Copy Number
-            </button>
+            <div class="phone-actions">
+                <button class="copy-btn" onclick="copyNumber()">
+                    <i class="bi bi-clipboard"></i> Copy Number
+                </button>
+                <button class="call-btn" onclick="callAgent()">
+                    <i class="bi bi-telephone-fill"></i> Test AI Now
+                </button>
+            </div>
         </div>
 
-        <!-- Stats -->
+        <div class="forwarding-card">
+            <div class="d-flex justify-content-between align-items-center">
+                <div>
+                    <div class="forwarding-label">📞 Call Forwarding Mode</div>
+                    <div class="forwarding-subtitle">
+                        <span id="forwardingStatus">Agent Mode (AI answers)</span>
+                    </div>
+                    <div class="forwarding-help">
+                        <span id="forwardingHelp">All calls handled by AI</span>
+                    </div>
+                </div>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="forwardingToggle" onchange="toggleForwarding()">
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+        </div>
+
         <div class="stats">
             <div class="stat-card">
                 <div class="stat-icon">📞</div>
@@ -497,22 +543,7 @@
             </div>
         </div>
 
-        <!-- Call AI Agent Button -->
-<div class="call-ai-card">
-    <div class="d-flex justify-content-between align-items-center">
-        <div>
-            <div class="call-ai-label">🤖 Test Your AI Receptionist</div>
-            <div class="call-ai-subtitle">Call now to check schedules, make bookings, or test responses</div>
-        </div>
-        <button class="call-ai-btn" onclick="callAgent()">
-            <i class="bi bi-telephone-fill"></i> Call Now
-        </button>
-    </div>
-</div>
-
-        <!-- Calendar + Next Appointments Grid -->
         <div class="content-grid">
-            <!-- Calendar -->
             <div class="section">
                 <h2><i class="bi bi-calendar3"></i> Calendar</h2>
                 <div class="calendar">
@@ -525,13 +556,10 @@
                             <i class="bi bi-chevron-right"></i>
                         </button>
                     </div>
-                    <div class="calendar-days" id="calendarDays">
-                        <!-- Calendar will be generated by JS -->
-                    </div>
+                    <div class="calendar-days" id="calendarDays"></div>
                 </div>
             </div>
 
-            <!-- Next Appointments -->
             <div class="section">
                 <h2><i class="bi bi-clock"></i> Next Appointments</h2>
                 <div id="nextAppointments" class="loading">
@@ -541,7 +569,6 @@
             </div>
         </div>
 
-        <!-- Call Summary -->
         <div class="section" style="margin-bottom: 2rem;">
             <h2><i class="bi bi-bar-chart"></i> Call Summary (Last 7 Days)</h2>
             <div class="summary-grid">
@@ -560,7 +587,6 @@
             </div>
         </div>
 
-        <!-- Call List -->
         <div class="section">
             <h2>
                 <i class="bi bi-telephone"></i> Recent Calls
@@ -581,12 +607,14 @@
         let showingAll = false;
         let currentDate = new Date();
         let allCalls = [];
+        let allBookings = [];
+        let vapiNumber = '';
+        let forwardingNumber = '';
 
         if (!token) {
             window.location.href = '/login';
         }
 
-        // API Call
         async function apiCall(endpoint, options = {}) {
             try {
                 const response = await fetch(`${API_URL}${endpoint}`, {
@@ -619,16 +647,6 @@
             }
         }
 
-        function callAgent() {
-    const number = document.getElementById('vapiNumber').textContent;
-    if (!number || number === 'Loading...' || number === 'Not assigned yet') {
-        alert('VAPI number not ready yet');
-        return;
-    }
-    window.location.href = `tel:${number}`;
-}
-
-        // Load Dashboard
         async function loadDashboard() {
             try {
                 const data = await apiCall('/api/customer/dashboard');
@@ -636,8 +654,10 @@
 
                 document.getElementById('welcomeText').textContent = 
                     `Welcome, ${data.business_name || 'User'}!`;
-                document.getElementById('vapiNumber').textContent = 
-                    data.vapi_phone_number || 'Not assigned yet';
+                
+                vapiNumber = data.vapi_phone_number || '';
+                document.getElementById('vapiNumber').textContent = vapiNumber || 'Not assigned yet';
+                
                 document.getElementById('totalCalls').textContent = data.calls_today || 0;
                 document.getElementById('emergencyCalls').textContent = data.emergencies_today || 0;
                 document.getElementById('bookings').textContent = data.bookings_today || 0;
@@ -646,14 +666,67 @@
                     showTrialBanner(data.trial_ends_at);
                 }
 
+                loadForwardingSettings();
                 loadRecentCalls();
-                renderCalendar();
+                loadBookings();
             } catch (error) {
                 console.error('Dashboard error:', error);
             }
         }
 
-        // Load Calls
+        async function loadForwardingSettings() {
+            try {
+                const data = await apiCall('/api/customer/call-forwarding');
+                if (!data) return;
+
+                const enabled = data.enabled;
+                forwardingNumber = data.forwarding_number || data.vapi_number || vapiNumber;
+                
+                document.getElementById('forwardingToggle').checked = enabled;
+                updateForwardingUI(enabled);
+            } catch (error) {
+                console.error('Forwarding settings error:', error);
+            }
+        }
+
+        async function toggleForwarding() {
+            const enabled = document.getElementById('forwardingToggle').checked;
+            
+            try {
+                await apiCall('/api/customer/call-forwarding', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        enabled: enabled,
+                        forwarding_number: forwardingNumber
+                    })
+                });
+                
+                updateForwardingUI(enabled);
+                
+                if (enabled && forwardingNumber) {
+                    alert(`To activate:\n\nDial: *21*${forwardingNumber}#\n\nThis forwards calls to your AI receptionist`);
+                } else {
+                    alert('To deactivate:\n\nDial: #21#\n\nThis stops call forwarding');
+                }
+            } catch (error) {
+                console.error('Toggle error:', error);
+                document.getElementById('forwardingToggle').checked = !enabled;
+            }
+        }
+
+        function updateForwardingUI(enabled) {
+            const statusEl = document.getElementById('forwardingStatus');
+            const helpEl = document.getElementById('forwardingHelp');
+            
+            if (enabled) {
+                statusEl.textContent = 'Real Mode (Forwarded to you)';
+                helpEl.innerHTML = `Dial *21*${forwardingNumber}# to activate`;
+            } else {
+                statusEl.textContent = 'Agent Mode (AI answers)';
+                helpEl.innerHTML = 'All calls handled by AI';
+            }
+        }
+
         async function loadRecentCalls(limit = 100) {
             try {
                 const calls = await apiCall(`/api/customer/calls?limit=${limit}`);
@@ -668,11 +741,9 @@
                     return;
                 }
 
-                // Update customers count
                 const uniquePhones = new Set(calls.map(c => c.caller_phone));
                 document.getElementById('totalCustomers').textContent = uniquePhones.size;
 
-                // Calculate weekly summary
                 const now = new Date();
                 const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
                 const weekCalls = calls.filter(c => new Date(c.created_at) >= weekAgo);
@@ -684,7 +755,6 @@
                 const avgDuration = weekCalls.reduce((sum, c) => sum + (c.call_duration || 0), 0) / (weekCalls.length || 1);
                 document.getElementById('avgDuration').textContent = formatDuration(Math.round(avgDuration));
 
-                // Show calls (limit to 5 or all)
                 const displayCalls = showingAll ? calls : calls.slice(0, 5);
 
                 container.innerHTML = displayCalls.map(call => `
@@ -704,35 +774,41 @@
                     </div>
                 `).join('');
 
-                // Load appointments
-                loadNextAppointments(calls);
+                renderCalendar();
 
             } catch (error) {
                 console.error('Error loading calls:', error);
             }
         }
 
-        // Load Next Appointments
-        function loadNextAppointments(calls) {
-            const bookings = calls.filter(c => c.type === 'booking');
-            const container = document.getElementById('nextAppointments');
+        async function loadBookings() {
+            try {
+                const bookings = await apiCall('/api/customer/bookings');
+                if (!bookings) return;
+                
+                allBookings = bookings;
+                const container = document.getElementById('nextAppointments');
+                
+                if (bookings.length === 0) {
+                    container.innerHTML = '<div class="empty-state">No upcoming bookings</div>';
+                    renderCalendar();
+                    return;
+                }
+                
+                container.innerHTML = bookings.slice(0, 5).map(booking => `
+                    <div class="appointment-item">
+                        <div class="appointment-time">${booking.booking_date} at ${booking.booking_time}</div>
+                        <div class="appointment-title">${booking.service_type || 'Appointment'}</div>
+                        <div class="appointment-phone">${booking.customer_name || booking.customer_phone}</div>
+                    </div>
+                `).join('');
 
-            if (bookings.length === 0) {
-                container.innerHTML = '<div class="empty-state">No appointments scheduled</div>';
-                return;
+                renderCalendar();
+            } catch (error) {
+                console.error('Bookings error:', error);
             }
-
-            // Show next 5 bookings
-            container.innerHTML = bookings.slice(0, 5).map(booking => `
-                <div class="appointment-item">
-                    <div class="appointment-time">${formatDate(booking.created_at)}</div>
-                    <div class="appointment-title">Appointment</div>
-                    <div class="appointment-phone">${booking.caller_phone}</div>
-                </div>
-            `).join('');
         }
 
-        // Calendar
         function renderCalendar() {
             const year = currentDate.getFullYear();
             const month = currentDate.getMonth();
@@ -748,24 +824,19 @@
 
             let html = '';
             
-            // Day headers
             ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].forEach(day => {
                 html += `<div class="calendar-day-header">${day}</div>`;
             });
 
-            // Empty cells before month starts
             for (let i = 0; i < firstDay; i++) {
                 html += '<div class="calendar-day empty"></div>';
             }
 
-            // Days
             for (let day = 1; day <= daysInMonth; day++) {
                 const date = new Date(year, month, day);
+                const dateStr = date.toISOString().split('T')[0];
                 const isToday = date.toDateString() === today.toDateString();
-                const hasBooking = allCalls.some(call => 
-                    call.type === 'booking' && 
-                    new Date(call.created_at).toDateString() === date.toDateString()
-                );
+                const hasBooking = allBookings.some(b => b.booking_date === dateStr);
 
                 let classes = 'calendar-day';
                 if (isToday) classes += ' today';
@@ -787,14 +858,12 @@
             renderCalendar();
         }
 
-        // Toggle show all
         function toggleShowAll() {
             showingAll = !showingAll;
             document.getElementById('viewAllBtn').textContent = showingAll ? 'Show Less' : 'Show All';
             loadRecentCalls();
         }
 
-        // Helpers
         function getBadgeType(call) {
             if (call.is_emergency) return 'emergency';
             if (call.type === 'booking') return 'booking';
@@ -855,7 +924,7 @@
                     window.location.href = data.checkout_url;
                 }
             } catch (error) {
-                alert('Failed to start checkout');
+                alert('Failed to start checkout. Please try again.');
             }
         }
 
@@ -878,7 +947,17 @@
                     btn.style.background = 'white';
                     btn.style.color = '#F59E0B';
                 }, 2000);
+            }).catch(() => {
+                alert('Failed to copy. Please copy manually: ' + number);
             });
+        }
+
+        function callAgent() {
+            if (!vapiNumber || vapiNumber === 'Loading...' || vapiNumber === 'Not assigned yet') {
+                alert('VAPI number not ready yet');
+                return;
+            }
+            window.location.href = `tel:${vapiNumber}`;
         }
 
         function logout() {
@@ -888,9 +967,10 @@
             }
         }
 
-        // Initialize
         loadDashboard();
-        setInterval(loadDashboard, 30000);
+        setInterval(() => {
+            loadDashboard();
+        }, 30000);
     </script>
 </body>
 </html>

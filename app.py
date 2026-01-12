@@ -523,22 +523,43 @@ def twilio_stream(ws):
 # ALL OTHER ROUTES (Same as original app.py)
 # =============================================================================
 
-# HTML Pages
 @app.route("/")
 def home():
     return render_template("index.html")
+
+
+@app.route("/signup")
+def signup_page():
+    return render_template("signup.html")
+
 
 @app.route("/login")
 def login_page():
     return render_template("login.html")
 
+
+@app.route("/success")
+def success_page():
+    return render_template("success.html")
+
+
 @app.route("/dashboard")
 def dashboard_page():
     return render_template("dashboard.html")
 
+
 @app.route("/calls")
 def calls_page():
     return render_template("calls.html")
+
+
+@app.route("/admin")
+def admin_page():
+    return render_template("admin.html")
+
+@app.route("/referrals")
+def referrals_page():
+    return render_template("referrals.html")  # Create this later
 
 # Auth
 @app.route("/api/auth/request-otp", methods=["POST"])

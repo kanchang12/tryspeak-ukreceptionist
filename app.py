@@ -447,7 +447,7 @@ TONE: Professional, warm, British accent. Keep responses under 3 sentences.
 # =============================================================================
 # TWILIO WEBHOOKS
 # =============================================================================
-@app.route("/api/twilio/voice", methods=["POST"])
+@app.route("/api/twilio/voice", methods=["POST", "get"])
 def twilio_voice():
     """Handle incoming call from Twilio"""
     from_number = request.form.get("From")
@@ -702,7 +702,7 @@ Referral: {referral_code}""",
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/admin/assign-number", methods=["POST"])
+@app.route("/api/admin/assign-number", methods=["POST", "get"])
 def assign_twilio_number():
     """Admin assigns Twilio number to business owner"""
     data = request.json or {}
@@ -736,7 +736,7 @@ Your referral code: {owner.get('referral_code')}"""
 # =============================================================================
 # REFERRAL SYSTEM
 # =============================================================================
-@app.route("/api/referrals/check", methods=["POST"])
+@app.route("/api/referrals/check", methods=["POST", "get"])
 def check_referral_code():
     """Check if referral code is valid and return referrer info"""
     data = request.json or {}
@@ -785,7 +785,7 @@ def get_referral_stats():
 # =============================================================================
 # AUTH
 # =============================================================================
-@app.route("/api/auth/request-otp", methods=["POST"])
+@app.route("/api/auth/request-otp", methods=["POST", "get"])
 def api_auth_request_otp():
     data = request.json or {}
     phone = (data.get("phone") or "").strip()
@@ -803,7 +803,7 @@ def api_auth_request_otp():
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
-@app.route("/api/auth/verify-otp", methods=["POST"])
+@app.route("/api/auth/verify-otp", methods=["POST", "get"])
 def api_auth_verify_otp():
     data = request.json or {}
     phone = (data.get("phone") or "").strip()
@@ -943,7 +943,7 @@ def call_forwarding_toggle():
     return jsonify({"status": "updated", "enabled": enabled}), 200
 
 # Stripe billing
-@app.route("/api/billing/checkout", methods=["POST"])
+@app.route("/api/billing/checkout", methods=["POST", "get"])
 def api_billing_checkout():
     owner, err = require_app_auth()
     if err:
@@ -973,7 +973,7 @@ def api_billing_checkout():
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
-@app.route("/api/stripe/webhook", methods=["POST"])
+@app.route("/api/stripe/webhook", methods=["POST", "get"])
 def api_stripe_webhook():
     if not STRIPE_WEBHOOK_SECRET:
         return jsonify({"error": "Stripe webhook not configured"}), 500

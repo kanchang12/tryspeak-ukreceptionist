@@ -589,6 +589,11 @@ def customer_call_started():
     if request.method == "GET":
         return "Webhook ready"
     
+    # 1. Fetch current system time
+    now = datetime.utcnow()
+    current_date_str = now.strftime("%A, %d %B %Y") # e.g., Monday, 12 January 2026
+    current_time_str = now.strftime("%H:%M")        # e.g., 14:37
+    
     data = request.get_json(silent=True) or {}
     message = data.get("message", {})
     call = message.get("call", {})
@@ -605,80 +610,52 @@ def customer_call_started():
         return jsonify({}), 200
 
     # ---------------------------------------------------------
-    # OWNER DIFFERENTIATION LOGIC (British Butler Persona)
+    # OWNER DIFFERENTIATION (With Correct Date/Time)
     # ---------------------------------------------------------
     if from_number == owner.get("phone_number"):
-        try:
-            # Fetch the very next pending appointment for this owner
-            next_booking = DB.find_one(
-                "bookings", 
-                where={"business_owner_id": owner["id"], "status": "pending"},
-                order_by="booking_date ASC, booking_time ASC"
-            )
-            
-            if next_booking:
-                schedule_update = (
-                    f"Your next client is {next_booking.get('customer_name', 'someone')} "
-                    f"at {next_booking.get('booking_time')} for {next_booking.get('service_type', 'a service')}."
-                )
-            else:
-                schedule_update = "The calendar is looking suspiciously empty. A rare moment of peace for you."
+        next_booking = DB.find_one(
+            "bookings", 
+            where={"business_owner_id": owner["id"], "status": "pending"},
+            order_by="booking_date ASC, booking_time ASC"
+        )
+        
+        schedule_update = "The calendar is blissfully empty, Gaffer."
+        if next_booking:
+            schedule_update = f"Your next victim is {next_booking.get('customer_name')} at {next_booking.get('booking_time')}."
 
-            return jsonify({
-                "messages": [{
-                    "role": "system",
-                    "content": f"""
-                    IDENTITY: You are the AI personal assistant for {owner.get('business_name')}. 
-                    The person you are speaking to is your employer (the Boss).
-                    
-                    TONE: Heavy English humor. Think dry, witty, and slightly posh—like a loyal but sarcastic British butler. 
-                    Use phrases like 'Right then', 'Gaffer', 'Lovely stuff', 'Absolute shambles', or 'A spot of tea'.
-                    
-                    CURRENT INTEL: {schedule_update}
-                    
-                    INSTRUCTIONS: 
-                    1. Greet the boss with a witty remark about them checking up on you.
-                    2. Discreetly mention the next appointment info provided above.
-                    3. Ask if they want a summary of the 'local riff-raff' (recent customer calls) or if they're just testing your circuits.
-                    """
-                }]
-            }), 200
-        except Exception as e:
-            logger.error(f"Error in owner-start logic: {e}")
-            # Fallback so the call doesn't drop if DB fails
-            return jsonify({"messages": [{"role": "system", "content": "Hello Boss. Systems are nominal."}]}), 200
-
-    # ---------------------------------------------------------
-    # REGULAR CUSTOMER LOGIC
-    # ---------------------------------------------------------
-    customer = DB.find_one("their_customers", {
-        "business_owner_id": owner["id"],
-        "phone_number": from_number
-    })
-    
-    if not customer:
         return jsonify({
             "messages": [{
                 "role": "system",
-                "content": f"New customer calling {owner.get('business_name')}. Be professional and helpful."
+                "content": f"""
+                IDENTITY: You are the loyal British Butler for {owner.get('business_name')}.
+                CURRENT DATE/TIME: It is {current_date_str} at {current_time_str}.
+                
+                TONE: Dry English wit. Use phrases like 'Right then', 'Gaffer', and 'Lovely stuff'.
+                
+                CONTEXT: The boss is calling. 
+                1. Greet them (e.g., 'Ah, the Gaffer—checking if I've clocked off early?').
+                2. Mention the time/date if they ask, or just use it to be accurate.
+                3. Intel: {schedule_update}
+                """
             }]
         }), 200
 
-    # Returning customer context
-    past_calls = DB.find_many("interactions", where={"customer_id": customer["id"]}, order_by="created_at DESC", limit=3)
-    
-    context = f"RETURNING CUSTOMER: {customer.get('name', 'Customer')}. "
-    if past_calls:
-        summaries = [c.get("summary", "") for c in past_calls]
-        context += f"Last notes: {' | '.join(summaries)}"
-
+    # ---------------------------------------------------------
+    # REGULAR CUSTOMER (With Correct Date/Time)
+    # ---------------------------------------------------------
     return jsonify({
         "messages": [{
             "role": "system",
-            "content": context + "\nWelcome them back warmly."
+            "content": f"""
+            You are a professional assistant for {owner.get('business_name')}.
+            TODAY'S DATE: {current_date_str}.
+            CURRENT TIME: {current_time_str}.
+            
+            Help the customer book an appointment. If they ask for 'tomorrow', 
+            you know tomorrow is {(now + timedelta(days=1)).strftime('%A, %d %B')}.
+            """
         }]
     }), 200
-
 
 @app.route("/api/vapi/call-ended", methods=["POST", "GET"])
 def customer_call_ended():
@@ -697,69 +674,48 @@ def customer_call_ended():
     duration = int(message.get("durationSeconds", 0))
     recording_url = message.get("recordingUrl", "")
 
-    if not to_number or not from_number or not vapi_call_id:
-        return jsonify({"status": "ok"}), 200
+    if not to_number or not from_number:
+        return jsonify({"status": "missing_data"}), 200
 
-    # Check for duplicate webhook events
-    existing = DB.find_one("interactions", {"vapi_call_id": vapi_call_id})
-    if existing:
+    # Prevent duplicate entries
+    if DB.find_one("interactions", {"vapi_call_id": vapi_call_id}):
         return jsonify({"status": "duplicate"}), 200
 
     owner = DB.find_one("business_owners", {"vapi_phone_number": to_number})
     if not owner:
-        return jsonify({"status": "owner_not_found"}), 200
+        return jsonify({"status": "no_owner"}), 200
 
-    # ---------------------------------------------------------
-    # SKIP LOGGING IF OWNER IS CALLING
-    # ---------------------------------------------------------
-    if from_number == owner.get("phone_number"):
-        return jsonify({"status": "owner_test_not_logged"}), 200
-
-    # Find or create the customer record
-    customer = DB.find_one("their_customers", {
-        "business_owner_id": owner["id"], 
-        "phone_number": from_number
-    })
-    
-    if customer:
-        DB.update("their_customers", {"id": customer["id"]}, {
-            "total_calls": (customer.get("total_calls") or 0) + 1
-        })
-        customer_id = customer["id"]
-    else:
-        new_cust = DB.insert("their_customers", {
+    # Handle Customer Record
+    customer = DB.find_one("their_customers", {"business_owner_id": owner["id"], "phone_number": from_number})
+    if not customer:
+        customer = DB.insert("their_customers", {
             "business_owner_id": owner["id"],
             "phone_number": from_number,
-            "total_calls": 1,
-            "name": "New Customer"
+            "name": "Owner" if from_number == owner.get("phone_number") else "New Customer",
+            "total_calls": 1
         })
-        customer_id = new_cust["id"]
+    else:
+        DB.update("their_customers", {"id": customer["id"]}, {"total_calls": (customer.get("total_calls") or 0) + 1})
 
-    # Simple keyword detection for tagging
-    is_emergency = any(kw in transcript.lower() for kw in ["emergency", "urgent", "burst", "leak", "flood"])
-    is_booking = any(kw in transcript.lower() for kw in ["book", "appointment", "schedule"])
+    # Log the interaction (EVERY call is logged here)
+    interaction_type = "owner_test" if from_number == owner.get("phone_number") else "inbound_call"
+    if "book" in transcript.lower() or "appointment" in transcript.lower():
+        interaction_type = "booking"
 
-    # Save the interaction
     DB.insert("interactions", {
         "vapi_call_id": vapi_call_id,
         "business_owner_id": owner["id"],
-        "customer_id": customer_id,
-        "type": "booking" if is_booking else "inbound_call",
+        "customer_id": customer["id"],
+        "type": interaction_type,
         "caller_phone": from_number,
         "call_duration": duration,
         "recording_url": recording_url,
         "transcript": transcript,
-        "summary": transcript[:200] if transcript else "No transcript available",
-        "is_emergency": is_emergency,
+        "summary": transcript[:200] if transcript else "No transcript.",
+        "is_emergency": any(kw in transcript.lower() for kw in ["emergency", "leak", "burst"]),
     })
 
-    if is_emergency:
-        send_sms(
-            to=owner["phone_number"], 
-            message=f"🚨 Emergency Alert: A caller is reporting an urgent issue. Transcript: {transcript[:100]}..."
-        )
-
-    return jsonify({"status": "success"}), 200
+    return jsonify({"status": "logged"}), 200
 
 # =============================================================================
 # CUSTOMER APIs (auth + subscription gate)

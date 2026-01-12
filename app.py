@@ -540,7 +540,207 @@ def dashboard_page():
 def calls_page():
     return render_template("calls.html")
 
-# Auth
+@app.route("/admin")
+def admin_page():
+    return render_template("admin_dashboard.html")
+
+# =============================================================================
+# ADMIN & ONBOARDING
+# =============================================================================
+@app.route("/admin", methods=["GET", "POST"])
+def admin():
+    token_ok = False
+    if request.method == "POST":
+        token = request.form.get("token")
+        if token and token == os.getenv("ADMIN_TOKEN"):
+            token_ok = True
+
+    if not token_ok:
+        return render_template("admin_dashboard.html", logged_in=False)
+
+    calls = DB.find_many("onboarding_calls", order_by="created_at DESC", limit=50)
+    return render_template("admin_dashboard.html", logged_in=True, calls=calls)
+
+
+@app.route("/api/admin/pending-onboardings", methods=["GET"])
+def get_pending_onboardings():
+    try:
+        pending = DB.find_many(
+            "onboarding_calls",
+            where={"status": "pending"},
+            order_by="created_at ASC",
+        )
+
+        for call in pending:
+            created = call.get("created_at")
+            if created:
+                waiting_hours = (datetime.utcnow() - created).total_seconds() / 3600
+                call["hours_waiting"] = round(waiting_hours, 1)
+
+        return jsonify(pending), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/admin/onboarding/<onboarding_id>", methods=["GET"])
+def get_onboarding_detail(onboarding_id):
+    try:
+        onboarding = DB.find_one("onboarding_calls", {"id": onboarding_id})
+        if not onboarding:
+            return jsonify({"error": "Not found"}), 404
+        return jsonify(onboarding), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/admin/onboarding/<onboarding_id>/create-assistant", methods=["POST", "GET"])
+def create_assistant_from_onboarding(onboarding_id):
+    try:
+        onboarding = DB.find_one("onboarding_calls", {"id": onboarding_id})
+        if not onboarding:
+            return jsonify({"error": "Not found"}), 404
+
+        business_type = onboarding["business_type"]
+        business_name = onboarding["signup_name"]
+        
+        # For Twilio system - admin needs to manually buy Twilio number
+        # This endpoint now just creates the business owner record
+        
+        referral_code = f"{business_name.upper().replace(' ', '-')}-{onboarding['signup_phone'][-4:]}"
+        referred_by_code = None
+
+        # pull referral used at signup
+        signup = DB.find_one("signups", {"phone_number": onboarding["signup_phone"]})
+        if signup:
+            referred_by_code = signup.get("referral_code_used")
+
+        owner_data = {
+            "email": onboarding.get("signup_email", ""),
+            "phone_number": onboarding["signup_phone"],
+            "business_name": business_name,
+            "business_type": business_type,
+            "twilio_phone_number": None,  # Admin needs to assign manually
+            "referral_code": referral_code,
+            "referred_by_code": referred_by_code,
+            "subscription_status": "trialing",
+            "trial_ends_at": datetime.utcnow() + timedelta(days=14),
+            "status": "active",
+        }
+
+        owner = DB.insert("business_owners", owner_data)
+
+        DB.update(
+            "onboarding_calls",
+            {"id": onboarding_id},
+            {"status": "completed", "business_owner_id": owner["id"]},
+        )
+
+        # SMS will be sent after admin assigns Twilio number
+        send_sms(
+            to=onboarding["signup_phone"],
+            message=f"""Account created! 🎉
+
+An admin will assign your phone number shortly.
+
+Login: {APP_BASE_URL}/login
+(Use OTP on your mobile)
+
+Referral: {referral_code}""",
+        )
+
+        return jsonify({
+            "status": "success", 
+            "message": "Account created. Admin needs to assign Twilio number manually.",
+            "owner_id": owner["id"]
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/admin/assign-number", methods=["POST"])
+def assign_twilio_number():
+    """Admin assigns Twilio number to business owner"""
+    data = request.json or {}
+    owner_id = data.get("owner_id")
+    twilio_number = data.get("twilio_number")
+    
+    if not owner_id or not twilio_number:
+        return jsonify({"error": "Missing owner_id or twilio_number"}), 400
+    
+    owner = DB.find_one("business_owners", {"id": owner_id})
+    if not owner:
+        return jsonify({"error": "Owner not found"}), 404
+    
+    DB.update("business_owners", {"id": owner_id}, {"twilio_phone_number": twilio_number})
+    
+    # Send SMS with number
+    send_sms(
+        to=owner["phone_number"],
+        message=f"""Your AI receptionist is ready! 🎉
+
+Forward calls to: {twilio_number}
+
+Login: {APP_BASE_URL}/login
+
+Your referral code: {owner.get('referral_code')}"""
+    )
+    
+    return jsonify({"status": "success", "phone_number": twilio_number}), 200
+
+
+# =============================================================================
+# REFERRAL SYSTEM
+# =============================================================================
+@app.route("/api/referrals/check", methods=["POST"])
+def check_referral_code():
+    """Check if referral code is valid and return referrer info"""
+    data = request.json or {}
+    code = data.get("code", "").strip().upper()
+    
+    if not code:
+        return jsonify({"valid": False}), 200
+    
+    referrer = DB.find_one("business_owners", {"referral_code": code})
+    if referrer:
+        return jsonify({
+            "valid": True,
+            "referrer_name": referrer.get("business_name"),
+            "discount": 25  # £25 off first month
+        }), 200
+    
+    return jsonify({"valid": False}), 200
+
+
+@app.route("/api/referrals/stats", methods=["GET"])
+def get_referral_stats():
+    """Get referral statistics for logged-in user"""
+    owner, err = require_app_auth()
+    if err:
+        return err
+    
+    # Count referrals
+    referrals = DB.find_many("business_owners", {"referred_by_code": owner.get("referral_code")})
+    
+    # Calculate earnings (£25 per referral)
+    total_referrals = len(referrals)
+    total_earnings = total_referrals * 25
+    
+    return jsonify({
+        "referral_code": owner.get("referral_code"),
+        "total_referrals": total_referrals,
+        "total_earnings": total_earnings,
+        "referrals": [{
+            "business_name": r.get("business_name"),
+            "created_at": r.get("created_at"),
+            "status": r.get("subscription_status")
+        } for r in referrals]
+    }), 200
+
+
+# =============================================================================
+# AUTH
+# =============================================================================
 @app.route("/api/auth/request-otp", methods=["POST"])
 def api_auth_request_otp():
     data = request.json or {}

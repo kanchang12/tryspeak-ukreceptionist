@@ -340,89 +340,74 @@ def api_stripe_webhook():
 # =============================================================================
 # ONBOARDING
 # =============================================================================
-@app.route("/api/onboarding/start", methods=["POST", "GET"])
-def start_onboarding():
-    data = request.json
-
-    signup_data = {
-        "name": data["name"],
-        "email": data.get("email", ""),  # can be blank if you want later
-        "phone_number": data["phone"],
-        "business_name": data["business"],
-        "business_type": data["businessType"],
-        "message": data.get("message", ""),
-        "referral_code_used": data.get("referralCode"),
-        "status": "awaiting_call",
-    }
-
-    try:
-        DB.insert("signups", signup_data)
-
-        onboarding_phone = os.getenv("VAPI_ONBOARDING_PHONE", "0800 XXX XXX")
-
-        send_sms(
-            to=data["phone"],
-            message=f"""Hi {data['name']}! Welcome to TrySpeak.
-
-Call this number NOW: {onboarding_phone}
-
-- TrySpeak""",
-        )
-
-        return jsonify({"status": "success"}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/onboarding/webhook/call-ended", methods=["POST", "GET"])
-def onboarding_call_ended():
-    data = request.json
+@app.route("/api/vapi/call-started", methods=["POST", "GET"])
+def customer_call_started():
+    if request.method == "GET":
+        return jsonify({"status": "webhook ready"}), 200
+    
+    data = request.get_json(force=True, silent=True) or {}
     call = data.get("call", {})
-    customer_phone = call.get("customer", {}).get("number")
+    to_number = call.get("phoneNumberId")
+    from_number = call.get("customer", {}).get("number")
+
+    if not to_number or not from_number:
+        return jsonify({}), 200
+
+    owner = DB.find_one("business_owners", {"vapi_phone_number": to_number})
+    if not owner:
+        return jsonify({}), 200
+
+    customer = DB.find_one("their_customers", {"business_owner_id": owner["id"], "phone_number": from_number})
+    
+    if not customer:
+        return jsonify({"messages": [{"role": "system", "content": f"NEW customer: {from_number}"}]}), 200
+
+    past_calls = DB.find_many("interactions", where={"customer_id": customer["id"]}, order_by="created_at DESC", limit=1)
+    
+    context = f"RETURNING: {from_number}. Calls: {customer.get('total_calls', 0)}"
+    if past_calls:
+        context += f". Last: {past_calls[0].get('summary', '')[:100]}"
+    
+    return jsonify({"messages": [{"role": "system", "content": context}]}), 200
+
+
+@app.route("/api/vapi/call-ended", methods=["POST", "GET"])
+def customer_call_ended():
+    if request.method == "GET":
+        return jsonify({"status": "webhook ready"}), 200
+    
+    data = request.get_json(force=True, silent=True) or {}
+    call = data.get("call", {})
+    to_number = call.get("phoneNumberId")
+    from_number = call.get("customer", {}).get("number")
     transcript = data.get("transcript", "")
-    recording_url = data.get("recordingUrl", "")
-    started_at = call.get("startedAt")
-    ended_at = call.get("endedAt")
+    duration = call.get("duration", 0)
 
-    duration = None
-    if started_at and ended_at:
-        try:
-            start = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
-            end = datetime.fromisoformat(ended_at.replace("Z", "+00:00"))
-            duration = int((end - start).total_seconds())
-        except:
-            pass
+    owner = DB.find_one("business_owners", {"vapi_phone_number": to_number})
+    if not owner:
+        return jsonify({}), 200
 
-    try:
-        signup = DB.find_one("signups", {"phone_number": customer_phone})
-        if not signup:
-            return jsonify({"error": "Signup not found"}), 404
+    customer = DB.find_one("their_customers", {"business_owner_id": owner["id"], "phone_number": from_number})
+    
+    if customer:
+        DB.update("their_customers", {"id": customer["id"]}, {"total_calls": customer.get("total_calls", 0) + 1})
+        customer_id = customer["id"]
+    else:
+        new = DB.insert("their_customers", {"business_owner_id": owner["id"], "phone_number": from_number, "total_calls": 1})
+        customer_id = new["id"]
 
-        onboarding_data = {
-            "signup_email": signup.get("email", ""),
-            "signup_phone": customer_phone,
-            "signup_name": signup["name"],
-            "business_type": signup["business_type"],
-            "vapi_call_id": call.get("id"),
-            "call_started_at": started_at,
-            "call_ended_at": ended_at,
-            "call_duration": duration,
-            "full_transcript": transcript,
-            "recording_url": recording_url,
-            "status": "pending",
-        }
+    DB.insert("interactions", {
+        "business_owner_id": owner["id"],
+        "customer_id": customer_id,
+        "type": "inbound_call",
+        "caller_phone": from_number,
+        "call_duration": duration,
+        "transcript": transcript,
+        "summary": transcript[:200],
+        "is_emergency": any(k in transcript.lower() for k in ["burst", "leak", "emergency", "urgent"])
+    })
 
-        DB.insert("onboarding_calls", onboarding_data)
-
-        send_sms(to=customer_phone, message=f"Thanks {signup['name']}! Ready in 2 hours.")
-
-        admin_phone = os.getenv("ADMIN_PHONE")
-        if admin_phone:
-            send_sms(to=admin_phone, message=f"🔔 New: {signup['name']}")
-
-        return jsonify({"status": "success"}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    return jsonify({"status": "success"}), 200
 
 
 # =============================================================================

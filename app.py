@@ -248,7 +248,8 @@ TONE: Professional, warm, British accent. Keep responses under 3 sentences.
     async def process_speech(self, audio_data):
         """Process incoming speech and generate response"""
         try:
-            # Speech-to-Text using Google
+            # Speech-to-Text using Google Cloud Speech
+            # Works automatically on Cloud Run (no JSON key needed)
             client = speech.SpeechClient()
             audio = speech.RecognitionAudio(content=audio_data)
             config = speech.RecognitionConfig(
@@ -772,5 +773,5 @@ def health():
     return jsonify({"status": "healthy"}), 200
 
 if __name__ == "__main__":
-    port = 5000
+    port = int(os.getenv("PORT", 5000))
     app.run(debug=False, host="0.0.0.0", port=port)

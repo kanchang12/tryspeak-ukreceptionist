@@ -1,9 +1,48 @@
+# app.py  (FINAL)
+# - Supabase OTP login (phone)
+# - Referral stored
+# - 14-day trial + Stripe subscription (checkout + webhook)
+# - Subscription gate on login + customer APIs
+#
+# ENV required:
+#   AUTH_SECRET
+#   ADMIN_TOKEN
+#   SUPABASE_URL
+#   SUPABASE_ANON_KEY
+#   SUPABASE_JWT_SECRET
+#   STRIPE_SECRET_KEY
+#   STRIPE_WEBHOOK_SECRET
+#   STRIPE_PRICE_ID
+#   APP_BASE_URL   (default https://tryspeak.site)
+#   VAPI_ONBOARDING_PHONE
+#   ADMIN_PHONE (optional)
+#
+# DB tables assumed:
+#   signups (has referral_code_used)
+#   onboarding_calls
+#   business_owners:
+#     id, phone_number, vapi_phone_number, business_name, business_type, vapi_assistant_id,
+#     referral_code, referred_by_code,
+#     subscription_status, trial_ends_at,
+#     stripe_customer_id, stripe_subscription_id,
+#     status
+#
+# NOTE: OTP SMS is handled by Supabase/Twilio. Your send_sms() is NOT used for OTP.
+
 from flask import Flask, request, jsonify, render_template
 from flask_cors import CORS
 from dotenv import load_dotenv
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
+
+import jwt
+import stripe
+from supabase import create_client
+from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
+
 import logging
+from services.sms_service import send_sms
+from services.vapi_service import create_vapi_assistant, generate_assistant_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -12,746 +51,780 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app)
 
-# Supabase DB class
-from supabase import create_client, Client
-import logging
-logger = logging.getLogger(__name__)
+from services.cockroachdb_service import DB
 
-SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY", "")
-SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
+# =============================================================================
+# CONFIG
+# =============================================================================
+AUTH_SECRET = os.getenv("AUTH_SECRET", "change-me")
+serializer = URLSafeTimedSerializer(AUTH_SECRET)
 
-supabase: Client = None
-supabase_admin: Client = None
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY")
+SUPABASE_JWT_SECRET = os.environ.get("SUPABASE_JWT_SECRET")
 
-def _ensure_connected():
-    global supabase, supabase_admin
-    if supabase_admin is None:
-        try:
-            supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-            supabase_admin = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-            logger.info("Supabase connected")
-        except Exception as e:
-            logger.error(f"Supabase init failed: {e}")
-            raise
+supabase_anon = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
 
-class DB:
-    @staticmethod
-    def insert(table: str, data: dict):
-        _ensure_connected()
-        try:
-            result = supabase_admin.table(table).insert(data).execute()
-            return result.data[0] if result.data else None
-        except Exception as e:
-            logger.error(f"Insert failed: {e}")
-            return None
-    
-    @staticmethod
-    def find_one(table: str, where: dict):
-        _ensure_connected()
-        try:
-            query = supabase_admin.table(table).select('*')
-            for key, value in where.items():
-                query = query.eq(key, value)
-            result = query.limit(1).execute()
-            return result.data[0] if result.data else None
-        except Exception as e:
-            logger.error(f"Find one failed: {e}")
-            return None
-    
-    @staticmethod
-    def find_many(table: str, where: dict = None, order_by: str = None, limit: int = None):
-        _ensure_connected()
-        try:
-            query = supabase_admin.table(table).select('*')
-            
-            if where:
-                for key, value in where.items():
-                    query = query.eq(key, value)
-            
-            if order_by:
-                parts = order_by.split()
-                column = parts[0]
-                ascending = len(parts) == 1 or parts[1].upper() == 'ASC'
-                query = query.order(column, desc=not ascending)
-            
-            if limit:
-                query = query.limit(limit)
-            
-            result = query.execute()
-            return result.data if result.data else []
-        except Exception as e:
-            logger.error(f"Find many failed: {e}")
-            return []
-    
-    @staticmethod
-    def update(table: str, where: dict, data: dict):
-        _ensure_connected()
-        try:
-            query = supabase_admin.table(table).update(data)
-            for key, value in where.items():
-                query = query.eq(key, value)
-            query.execute()
-            return True
-        except Exception as e:
-            logger.error(f"Update failed: {e}")
-            return False
-    
-    @staticmethod
-    def delete(table: str, where: dict):
-        _ensure_connected()
-        try:
-            query = supabase_admin.table(table).delete()
-            for key, value in where.items():
-                query = query.eq(key, value)
-            query.execute()
-            return True
-        except Exception as e:
-            logger.error(f"Delete failed: {e}")
-            return False
-    
-    @staticmethod
-    def query(sql: str, params: list = None):
-        logger.warning("Raw SQL queries not directly supported with Supabase client")
-        return []
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
+STRIPE_PRICE_ID = os.getenv("STRIPE_PRICE_ID")
+APP_BASE_URL = os.getenv("APP_BASE_URL", "https://tryspeak.site")
 
-DB = DB()
+stripe.api_key = STRIPE_SECRET_KEY
 
-# Helper functions
-def send_sms(to, message):
-    print(f"SMS to {to}: {message}")
-    return True
 
-def create_vapi_assistant(name, system_prompt, voice_id):
-    return {"id": "asst_stub", "phoneNumber": "+441234567890"}
+# =============================================================================
+# HELPERS
+# =============================================================================
+def get_bearer_token() -> str | None:
+    auth = request.headers.get("Authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth.split(" ", 1)[1].strip()
+    # fallback: old style
+    return request.headers.get("X-Auth-Token") or None
 
-def generate_assistant_prompt(transcript, business_type, business_name):
-    return f"You are a helpful assistant for {business_name}, a {business_type} business."
 
-# ============================================================================
-# CUSTOMER PAGES
-# ============================================================================
+def require_app_auth():
+    """
+    Validates YOUR app token (itsdangerous) and returns owner row.
+    Frontend should send: Authorization: Bearer <token>
+    """
+    token = get_bearer_token()
+    if not token:
+        return None, (jsonify({"error": "Unauthorized"}), 401)
 
-@app.route('/')
+    try:
+        payload = serializer.loads(token, max_age=60 * 60 * 24 * 14)  # 14 days
+        owner_id = payload.get("owner_id")
+        if not owner_id:
+            return None, (jsonify({"error": "Unauthorized"}), 401)
+    except SignatureExpired:
+        return None, (jsonify({"error": "Session expired"}), 401)
+    except BadSignature:
+        return None, (jsonify({"error": "Unauthorized"}), 401)
+
+    owner = DB.find_one("business_owners", {"id": owner_id})
+    if not owner:
+        return None, (jsonify({"error": "Unauthorized"}), 401)
+
+    return owner, None
+
+
+def subscription_gate(owner):
+    """
+    Returns (ok:bool, message:str|None)
+    """
+    # if you want to allow even when status field is inactive, remove this
+    if owner.get("status") != "active":
+        return False, "Account inactive"
+
+    sub = owner.get("subscription_status") or "trialing"
+    if sub == "active":
+        return True, None
+
+    if sub == "trialing":
+        trial_ends = owner.get("trial_ends_at")
+        if not trial_ends:
+            return True, None
+
+        # normalize
+        if isinstance(trial_ends, str):
+            try:
+                trial_ends = datetime.fromisoformat(trial_ends.replace("Z", "+00:00")).replace(tzinfo=None)
+            except:
+                trial_ends = None
+
+        if not trial_ends:
+            return True, None
+
+        if datetime.utcnow() <= trial_ends.replace(tzinfo=None):
+            return True, None
+
+        return False, "Trial ended"
+
+    return False, "Subscription inactive"
+
+
+def decode_supabase_access_token(access_token: str):
+    """
+    Verify Supabase JWT and return dict with at least {"sub": "...", "phone": "+44..."}.
+    """
+    decoded = jwt.decode(
+        access_token,
+        SUPABASE_JWT_SECRET,
+        algorithms=["HS256"],
+        options={"verify_aud": False},
+    )
+    return decoded
+
+
+# =============================================================================
+# HTML PAGES
+# =============================================================================
+@app.route("/")
 def home():
-    return render_template('index.html')
+    return render_template("index.html")
 
-@app.route('/signup')
+
+@app.route("/signup")
 def signup_page():
-    return render_template('signup.html')
+    return render_template("signup.html")
 
-@app.route('/login')
+
+@app.route("/login")
 def login_page():
-    return render_template('login.html')
+    return render_template("login.html")
 
-@app.route('/success')
+
+@app.route("/success")
 def success_page():
-    return render_template('success.html')
+    return render_template("success.html")
 
-@app.route('/dashboard')
+
+@app.route("/dashboard")
 def dashboard_page():
-    return render_template('dashboard.html')
+    return render_template("dashboard.html")
 
-@app.route('/calls')
+
+@app.route("/calls")
 def calls_page():
-    return render_template('calls.html')
+    return render_template("calls.html")
 
-# ============================================================================
-# CUSTOMER AUTH API
-# ============================================================================
 
-@app.route("/api/auth/send-otp", methods=["POST"])
-def send_otp():
+@app.route("/admin")
+def admin_page():
+    return render_template("admin.html")
+
+@app.route("/referrals")
+def referrals_page():
+    return render_template("referrals.html")  # Create this later
+
+
+# =============================================================================
+# AUTH (SUPABASE OTP)
+# =============================================================================
+@app.route("/api/auth/request-otp", methods=["POST", "GET"])
+def api_auth_request_otp():
     data = request.json or {}
     phone = (data.get("phone") or "").strip()
-    
-    if not phone:
-        return jsonify({"error": "Phone number required"}), 400
-    
-    user = DB.find_one("business_owners", {"phone_number": phone, "status": "active"})
-    
-    if not user:
-        return jsonify({"error": "Account not found or inactive"}), 404
-    
-    if not user.get("vapi_phone_number"):
-        return jsonify({"error": "Account setup incomplete. Contact support."}), 403
-    
+
+    if not phone or not phone.startswith("+"):
+        return jsonify({"error": "Phone must include country code, e.g. +447..." }), 400
+
+    # Allow OTP only if business owner exists
+    owner = DB.find_one("business_owners", {"phone_number": phone, "status": "active"})
+    if not owner:
+        return jsonify({"error": "No account for this phone"}), 404
+
     try:
-        if supabase:
-            supabase.auth.sign_in_with_otp({"phone": phone})
-        return jsonify({"status": "OTP sent"}), 200
+        supabase_anon.auth.sign_in_with_otp({"phone": phone})
+        return jsonify({"status": "sent"}), 200
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": str(e)}), 400
 
 
-@app.route("/api/auth/verify-otp", methods=["POST"])
-def verify_otp():
+@app.route("/api/auth/verify-otp", methods=["POST", "GET"])
+def api_auth_verify_otp():
     data = request.json or {}
     phone = (data.get("phone") or "").strip()
     otp = (data.get("otp") or "").strip()
-    
+
     if not phone or not otp:
-        return jsonify({"error": "Phone and OTP required"}), 400
-    
+        return jsonify({"error": "Missing phone or otp"}), 400
+
     try:
-        if supabase:
-            response = supabase.auth.verify_otp({"phone": phone, "token": otp, "type": "sms"})
-            
-            if not response.user:
-                return jsonify({"error": "Invalid OTP"}), 401
-            
-            user = DB.find_one("business_owners", {"phone_number": phone, "status": "active"})
-            
-            if not user:
-                return jsonify({"error": "Account not found"}), 404
-            
-            return jsonify({
-                "token": response.session.access_token,
-                "owner_id": user["id"],
-                "refresh_token": response.session.refresh_token
-            }), 200
-        else:
-            return jsonify({"error": "Supabase not configured"}), 500
+        out = supabase_anon.auth.verify_otp({"phone": phone, "token": otp, "type": "sms"})
+        session = getattr(out, "session", None)
+        if not session or not session.access_token:
+            return jsonify({"error": "Invalid OTP"}), 401
+
+        # ✅ Skip JWT decode, Supabase already validated it
+        # Just get user from session
+        user = getattr(out, "user", None)
+        if not user:
+            return jsonify({"error": "No user found"}), 401
+
+        owner = DB.find_one("business_owners", {"phone_number": phone, "status": "active"})
+        if not owner:
+            return jsonify({"error": "No account for this phone"}), 403
+
+        ok, msg = subscription_gate(owner)
+        if not ok:
+            return jsonify({"error": msg, "needs_payment": True}), 402
+
+        token = serializer.dumps({"owner_id": owner["id"]})
+        return jsonify({"token": token, "owner_id": owner["id"]}), 200
+
     except Exception as e:
-        return jsonify({"error": str(e)}), 401
+        logger.error(f"OTP verify error: {e}")
+        return jsonify({"error": str(e)}), 400
 
-# ============================================================================
-# ONBOARDING API
-# ============================================================================
 
-@app.route('/api/onboarding/start', methods=['POST'])
-def start_onboarding():
-    data = request.json
-    
-    signup_data = {
-        'name': data['name'],
-        'email': data['email'],
-        'phone_number': data['phone'],
-        'business_name': data['business'],
-        'business_type': data['businessType'],
-        'message': data.get('message', ''),
-        'referral_code_used': data.get('referralCode'),
-        'status': 'awaiting_call'
-    }
-    
+# =============================================================================
+# BILLING (STRIPE)
+# =============================================================================
+@app.route("/api/billing/checkout", methods=["POST", "GET"])
+def api_billing_checkout():
+    owner, err = require_app_auth()
+    if err:
+        return err
+
+    if not STRIPE_SECRET_KEY or not STRIPE_PRICE_ID:
+        return jsonify({"error": "Stripe not configured"}), 500
+
     try:
-        DB.insert('signups', signup_data)
-        
-        onboarding_phone = os.getenv('VAPI_ONBOARDING_PHONE', '0800 XXX XXX')
-        
-        send_sms(
-            to=data['phone'],
-            message=f"""Hi {data['name']}! Welcome to TrySpeak.
+        customer_id = owner.get("stripe_customer_id")
+        if not customer_id:
+            cust = stripe.Customer.create(
+                phone=owner.get("phone_number"),
+                metadata={"owner_id": str(owner["id"])},
+            )
+            customer_id = cust["id"]
+            DB.update("business_owners", {"id": owner["id"]}, {"stripe_customer_id": customer_id})
 
-Call this number NOW: {onboarding_phone}
-
-- TrySpeak"""
+        session = stripe.checkout.Session.create(
+            mode="subscription",
+            customer=customer_id,
+            line_items=[{"price": STRIPE_PRICE_ID, "quantity": 1}],
+            success_url=f"{APP_BASE_URL}/dashboard?paid=1",
+            cancel_url=f"{APP_BASE_URL}/dashboard?paid=0",
         )
-        
-        return jsonify({"status": "success"}), 200
+        return jsonify({"checkout_url": session["url"]}), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/stripe/webhook", methods=["POST", "GET"])
+def api_stripe_webhook():
+    if not STRIPE_WEBHOOK_SECRET:
+        return jsonify({"error": "Stripe webhook not configured"}), 500
+
+    payload = request.data
+    sig_header = request.headers.get("Stripe-Signature", "")
+
+    try:
+        event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+    etype = event["type"]
+    obj = event["data"]["object"]
+
+    try:
+        if etype in ("customer.subscription.created", "customer.subscription.updated"):
+            sub_id = obj["id"]
+            customer_id = obj["customer"]
+            status = obj["status"]  # active, trialing, past_due, canceled, unpaid...
+
+            owner = DB.find_one("business_owners", {"stripe_customer_id": customer_id})
+            if owner:
+                DB.update("business_owners", {"id": owner["id"]}, {
+                    "stripe_subscription_id": sub_id,
+                    "subscription_status": status
+                })
+
+        elif etype == "customer.subscription.deleted":
+            customer_id = obj["customer"]
+            owner = DB.find_one("business_owners", {"stripe_customer_id": customer_id})
+            if owner:
+                DB.update("business_owners", {"id": owner["id"]}, {"subscription_status": "canceled"})
+
+    except Exception as e:
+        # Don't fail the webhook hard; Stripe retries anyway
+        return jsonify({"error": str(e)}), 200
+
+    return jsonify({"received": True}), 200
+
+
+# =============================================================================
+# ONBOARDING
+# =============================================================================
+
+
+
+
+
+# =============================================================================
+# ADMIN (TOKEN FORM + PENDING LIST API)
+# =============================================================================
+@app.route("/admin", methods=["GET", "POST"])
+def admin():
+    token_ok = False
+    if request.method == "POST":
+        token = request.form.get("token")
+        if token and token == os.getenv("ADMIN_TOKEN"):
+            token_ok = True
+
+    if not token_ok:
+        return render_template("admin.html", logged_in=False)
+
+    calls = DB.find_many("onboarding_calls", order_by="created_at DESC", limit=50)
+    return render_template("admin.html", logged_in=True, calls=calls)
+
+
+@app.route("/api/admin/pending-onboardings", methods=["GET"])
+def get_pending_onboardings():
+    try:
+        pending = DB.find_many(
+            "onboarding_calls",
+            where={"status": "pending"},
+            order_by="created_at ASC",
+        )
+
+        for call in pending:
+            created = call.get("created_at")
+            if created:
+                waiting_hours = (datetime.utcnow() - created).total_seconds() / 3600
+                call["hours_waiting"] = round(waiting_hours, 1)
+
+        return jsonify(pending), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
-@app.route('/api/onboarding/webhook/call-ended', methods=['POST'])
-def onboarding_call_ended():
-    data = request.json
-    call = data.get('call', {})
-    customer_phone = call.get('customer', {}).get('number')
-    transcript = data.get('transcript', '')
-    recording_url = data.get('recordingUrl', '')
-    started_at = call.get('startedAt')
-    ended_at = call.get('endedAt')
-    
-    duration = None
-    if started_at and ended_at:
-        try:
-            start = datetime.fromisoformat(started_at.replace('Z', '+00:00'))
-            end = datetime.fromisoformat(ended_at.replace('Z', '+00:00'))
-            duration = int((end - start).total_seconds())
-        except:
-            pass
-    
+@app.route("/api/admin/onboarding/<onboarding_id>", methods=["GET"])
+def get_onboarding_detail(onboarding_id):
     try:
-        signup = DB.find_one('signups', {'phone_number': customer_phone})
-        if not signup:
-            return jsonify({"error": "Signup not found"}), 404
-        
-        onboarding_data = {
-            'signup_email': signup['email'],
-            'signup_phone': customer_phone,
-            'signup_name': signup['name'],
-            'business_type': signup['business_type'],
-            'vapi_call_id': call.get('id'),
-            'call_started_at': started_at,
-            'call_ended_at': ended_at,
-            'call_duration': duration,
-            'full_transcript': transcript,
-            'recording_url': recording_url,
-            'status': 'pending'
-        }
-        
-        DB.insert('onboarding_calls', onboarding_data)
-        
-        send_sms(to=customer_phone, message=f"Thanks {signup['name']}! Ready in 2 hours.")
-        
-        admin_phone = os.getenv('ADMIN_PHONE')
-        if admin_phone:
-            send_sms(to=admin_phone, message=f"🔔 New: {signup['name']}")
-        
-        return jsonify({"status": "success"}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-# ============================================================================
-# VAPI WEBHOOKS
-# ============================================================================
-
-@app.route('/api/vapi/call-started', methods=['POST'])
-def customer_call_started():
-    data = request.json
-    call = data.get('call', {})
-    to_number = call.get('phoneNumberId')
-    from_number = call.get('customer', {}).get('number')
-    
-    try:
-        owner = DB.find_one('business_owners', {'vapi_phone_number': to_number})
-        if not owner:
-            return jsonify({"context": ""}), 200
-        
-        is_owner = (from_number == owner.get('phone_number'))
-        
-        if is_owner:
-            # OWNER calling - get business stats
-            today = datetime.utcnow().date().isoformat()
-            
-            # Get today's bookings
-            bookings = DB.find_many('bookings', 
-                where={'business_owner_id': owner['id'], 'appointment_date': today},
-                order_by='appointment_time ASC',
-                limit=5
-            )
-            
-            bookings_text = ""
-            if bookings:
-                bookings_text = "\nToday's bookings:\n" + "\n".join([
-                    f"- {b['customer_name']} at {b['appointment_time']} for {b.get('service', 'service')}"
-                    for b in bookings
-                ])
-            
-            context = f"""You are talking to {owner.get('business_name')} owner.{bookings_text}
-Help them manage their business."""
-            
-            return jsonify({"context": context}), 200
-        
-        # CUSTOMER calling - get their history
-        customer = DB.find_one('their_customers', {
-            'business_owner_id': owner['id'],
-            'phone_number': from_number
-        })
-        
-        context = ""
-        if customer:
-            # Get upcoming bookings
-            today = datetime.utcnow().date().isoformat()
-            upcoming = DB.find_many('bookings',
-                where={
-                    'business_owner_id': owner['id'],
-                    'customer_phone': from_number
-                },
-                order_by='appointment_date ASC',
-                limit=3
-            )
-            
-            # Filter for future bookings
-            upcoming = [b for b in upcoming if b['appointment_date'] >= today]
-            
-            if upcoming:
-                next_booking = upcoming[0]
-                date_obj = datetime.fromisoformat(next_booking['appointment_date'])
-                date_str = date_obj.strftime('%A, %B %d')
-                context = f"Returning customer {customer.get('name', '')}. Next booking: {date_str} at {next_booking['appointment_time']}. "
-            else:
-                context = f"Returning customer {customer.get('name', 'this customer')}. No upcoming bookings. "
-        
-        return jsonify({"context": context}), 200
-    except Exception as e:
-        logger.error(f"Error in call-started: {e}")
-        return jsonify({"context": ""}), 200
-
-
-@app.route('/api/vapi/call-ended', methods=['POST'])
-def customer_call_ended():
-    data = request.json
-    call = data.get('call', {})
-    to_number = call.get('phoneNumberId')
-    from_number = call.get('customer', {}).get('number')
-    transcript = data.get('transcript', '')
-    recording_url = data.get('recordingUrl', '')
-    duration = call.get('duration', 0)
-    
-    try:
-        owner = DB.find_one('business_owners', {'vapi_phone_number': to_number})
-        if not owner:
+        onboarding = DB.find_one("onboarding_calls", {"id": onboarding_id})
+        if not onboarding:
             return jsonify({"error": "Not found"}), 404
-        
-        customer = DB.find_one('their_customers', {
-            'business_owner_id': owner['id'],
-            'phone_number': from_number
-        })
-        
-        if customer:
-            # Update total calls
-            DB.update('their_customers', 
-                     {'id': customer['id']},
-                     {'total_calls': customer.get('total_calls', 0) + 1})
-            customer_id = customer['id']
-        else:
-            new_customer = DB.insert('their_customers', {
-                'business_owner_id': owner['id'],
-                'phone_number': from_number,
-                'total_calls': 1
-            })
-            customer_id = new_customer['id']
-        
-        emergency_keywords = ['burst', 'leak', 'emergency', 'urgent', 'flooding', 'sparks']
-        is_emergency = any(kw in transcript.lower() for kw in emergency_keywords)
-        
-        DB.insert('interactions', {
-            'business_owner_id': owner['id'],
-            'customer_id': customer_id,
-            'type': 'inbound_call',
-            'caller_phone': from_number,
-            'call_duration': duration,
-            'recording_url': recording_url,
-            'transcript': transcript,
-            'summary': transcript[:200],
-            'is_emergency': is_emergency
-        })
-        
-        if is_emergency:
-            send_sms(to=owner['phone_number'], message=f"🚨 EMERGENCY: {transcript[:100]}")
-        
-        return jsonify({"status": "success"}), 200
+        return jsonify(onboarding), 200
     except Exception as e:
-        logger.error(f"Error in call-ended: {e}")
         return jsonify({"error": str(e)}), 500
 
-# ============================================================================
-# CUSTOMER DASHBOARD API
-# ============================================================================
 
-def verify_auth():
-    auth_header = request.headers.get('Authorization')
-    if not auth_header or not auth_header.startswith('Bearer '):
-        return None
-    
-    token = auth_header.split(' ')[1]
+@app.route("/api/admin/onboarding/<onboarding_id>/create-assistant", methods=["POST", "GET"])
+def create_assistant_from_onboarding(onboarding_id):
     try:
-        if supabase:
-            user = supabase.auth.get_user(token)
-            if user:
-                phone = user.user.phone
-                owner = DB.find_one('business_owners', {'phone_number': phone})
-                return owner['id'] if owner else None
-    except:
-        return None
+        onboarding = DB.find_one("onboarding_calls", {"id": onboarding_id})
+        if not onboarding:
+            return jsonify({"error": "Not found"}), 404
+
+        transcript = onboarding["full_transcript"]
+        business_type = onboarding["business_type"]
+        business_name = onboarding["signup_name"]
+
+        system_prompt = generate_assistant_prompt(transcript, business_type, business_name)
+
+        assistant = create_vapi_assistant(
+            name=f"{business_name} Receptionist",
+            system_prompt=system_prompt,
+            voice_id="XB0fDUnXU5powFXDhCwa",
+        )
+
+        referral_code = f"{business_name.upper().replace(' ', '-')}-{onboarding['signup_phone'][-4:]}"
+        referred_by_code = None
+
+        # pull referral used at signup
+        signup = DB.find_one("signups", {"phone_number": onboarding["signup_phone"]})
+        if signup:
+            referred_by_code = signup.get("referral_code_used")
+
+        owner_data = {
+            "email": onboarding.get("signup_email", ""),
+            "phone_number": onboarding["signup_phone"],
+            "business_name": business_name,
+            "business_type": business_type,
+            "vapi_assistant_id": assistant["id"],
+            "vapi_phone_number": assistant["phoneNumber"],
+            "referral_code": referral_code,
+            "referred_by_code": referred_by_code,
+            "subscription_status": "trialing",
+            "trial_ends_at": datetime.utcnow() + timedelta(days=14),
+            "status": "active",
+        }
+
+        owner = DB.insert("business_owners", owner_data)
+
+        DB.update(
+            "onboarding_calls",
+            {"id": onboarding_id},
+            {"status": "completed", "business_owner_id": owner["id"]},
+        )
+
+        # Keep this SMS minimal (NO password, because login is OTP)
+        send_sms(
+            to=onboarding["signup_phone"],
+            message=f"""Ready! 🎉
+
+Forward to: {assistant['phoneNumber']}
+
+Login: {APP_BASE_URL}/login
+(Use OTP on your mobile)
+
+Referral: {referral_code}""",
+        )
+
+        return jsonify({"status": "success", "phone_number": assistant["phoneNumber"]}), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
-@app.route('/api/customer/dashboard', methods=['GET'])
-def get_customer_dashboard():
-    owner_id = verify_auth()
-    if not owner_id:
-        return jsonify({"error": "Unauthorized"}), 401
-    
-    try:
-        # Get today's interactions for stats
-        today = datetime.utcnow().date().isoformat()
-        interactions = DB.find_many('interactions',
-                                   where={'business_owner_id': owner_id},
-                                   limit=100)
-        
-        # Filter for today and count
-        today_interactions = [i for i in interactions if i.get('created_at', '').startswith(today)]
-        total_calls = len(today_interactions)
-        emergencies = sum(1 for i in today_interactions if i.get('is_emergency'))
-        bookings_count = sum(1 for i in today_interactions if i.get('type') == 'booking')
-        
-        owner = DB.find_one('business_owners', {'id': owner_id})
-        
+# =============================================================================
+# VAPI WEBHOOKS (unchanged)
+# =============================================================================
+
+# =============================================================================
+# CALL FORWARDING TOGGLE
+# =============================================================================
+@app.route("/api/customer/call-forwarding", methods=["GET", "POST"])
+def call_forwarding_toggle():
+    owner, err = require_app_auth()
+    if err:
+        return err
+
+    ok, msg = subscription_gate(owner)
+    if not ok:
+        return jsonify({"error": msg, "needs_payment": True}), 402
+
+    if request.method == "GET":
         return jsonify({
-            "calls_today": total_calls,
-            "emergencies_today": emergencies,
-            "bookings_today": bookings_count,
-            "business_name": owner.get('business_name') if owner else 'Your Business',
-            "vapi_phone_number": owner.get('vapi_phone_number') if owner else None,
-            "vapi_assistant_id": owner.get('vapi_assistant_id') if owner else None
+            "enabled": owner.get("call_forwarding_enabled", False),
+            "forwarding_number": owner.get("forwarding_number", ""),
+            "vapi_number": owner.get("vapi_phone_number", "")
         }), 200
-    except Exception as e:
-        logger.error(f"Dashboard error: {e}")
-        return jsonify({"error": str(e)}), 500
+
+    # POST - Update settings
+    data = request.json or {}
+    enabled = data.get("enabled", False)
+    forwarding_number = data.get("forwarding_number", "")
+
+    DB.update("business_owners", {"id": owner["id"]}, {
+        "call_forwarding_enabled": enabled,
+        "forwarding_number": forwarding_number
+    })
+
+    return jsonify({"status": "updated", "enabled": enabled}), 200
 
 
-@app.route('/api/customer/calls', methods=['GET'])
-def get_customer_calls():
-    owner_id = verify_auth()
-    if not owner_id:
-        return jsonify({"error": "Unauthorized"}), 401
-    
-    try:
-        limit = int(request.args.get('limit', 20))
-        calls = DB.find_many('interactions', 
-                            where={'business_owner_id': owner_id}, 
-                            order_by='created_at DESC', 
-                            limit=limit)
-        return jsonify(calls), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route('/api/customer/bookings', methods=['GET'])
+# =============================================================================
+# BOOKINGS API
+# =============================================================================
+@app.route("/api/customer/bookings", methods=["GET"])
 def get_bookings():
-    owner_id = verify_auth()
-    if not owner_id:
-        return jsonify({"error": "Unauthorized"}), 401
-    
+    owner, err = require_app_auth()
+    if err:
+        return err
+
+    ok, msg = subscription_gate(owner)
+    if not ok:
+        return jsonify({"error": msg, "needs_payment": True}), 402
+
     try:
-        bookings = DB.find_many('bookings', 
-                               where={'business_owner_id': owner_id}, 
-                               order_by='appointment_date DESC, appointment_time DESC',
-                               limit=100)
+        bookings = DB.find_many(
+            "bookings",
+            where={"business_owner_id": owner["id"]},
+            order_by="booking_date ASC",
+            limit=100
+        )
         return jsonify(bookings), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
-@app.route('/api/customer/bookings', methods=['POST'])
-def create_booking():
-    owner_id = verify_auth()
-    if not owner_id:
-        return jsonify({"error": "Unauthorized"}), 401
+@app.route("/api/vapi/create-booking", methods=["POST"])
+def vapi_create_booking():
+    """VAPI calls this when customer books appointment"""
+    data = request.get_json(silent=True) or {}
     
-    data = request.json
+    customer_phone = data.get("customer_phone")
+    booking_date = data.get("booking_date")
+    booking_time = data.get("booking_time")
+    customer_name = data.get("customer_name", "Unknown")
+    service_type = data.get("service_type", "General")
+    notes = data.get("notes", "")
     
-    booking_data = {
-        'business_owner_id': owner_id,
-        'customer_name': data['customer_name'],
-        'customer_phone': data['customer_phone'],
-        'appointment_date': data['appointment_date'],
-        'appointment_time': data['appointment_time'],
-        'service': data.get('service', ''),
-        'notes': data.get('notes', ''),
-        'status': 'confirmed'
-    }
+    # Get context from VAPI
+    call_data = data.get("call", {})
+    phoneNumberId = call_data.get("phoneNumberId")
     
+    if not phoneNumberId:
+        return jsonify({"error": "No phone context"}), 400
+    
+    owner = DB.find_one("business_owners", {"vapi_phone_number": phoneNumberId})
+    if not owner:
+        return jsonify({"error": "Owner not found"}), 404
+    
+    # Find/create customer
+    customer = DB.find_one("their_customers", {
+        "business_owner_id": owner["id"],
+        "phone_number": customer_phone
+    })
+    if not customer:
+        customer = DB.insert("their_customers", {
+            "business_owner_id": owner["id"],
+            "phone_number": customer_phone,
+            "name": customer_name,
+            "total_calls": 0
+        })
+    
+    # Create booking
+    booking = DB.insert("bookings", {
+        "business_owner_id": owner["id"],
+        "customer_id": customer["id"],
+        "customer_name": customer_name,
+        "customer_phone": customer_phone,
+        "booking_date": booking_date,
+        "booking_time": booking_time,
+        "service_type": service_type,
+        "notes": notes,
+        "status": "pending"
+    })
+    
+    # Notify owner
+    send_sms(
+        to=owner["phone_number"],
+        message=f"📅 NEW BOOKING\n{customer_name}\n{booking_date} at {booking_time}\n{service_type}"
+    )
+    
+    return jsonify({
+        "success": True,
+        "message": f"Booking confirmed for {booking_date} at {booking_time}"
+    }), 200
+
+@app.route("/api/vapi/call-started", methods=["POST", "GET"])
+def customer_call_started():
+    if request.method == "GET":
+        return "Webhook ready"
+    
+    data = request.get_json(silent=True) or {}
+    message = data.get("message", {})
+    call = message.get("call", {})
+    phoneNumber = message.get("phoneNumber", {})
+    
+    to_number = phoneNumber.get("number")
+    from_number = call.get("customer", {}).get("number")
+
+    if not to_number or not from_number:
+        return jsonify({}), 200
+
+    owner = DB.find_one("business_owners", {"vapi_phone_number": to_number})
+    if not owner:
+        return jsonify({}), 200
+
+    # Skip if owner calling themselves
+    if from_number == owner.get("phone_number"):
+        return jsonify({
+            "messages": [{
+                "role": "system",
+                "content": "OWNER TESTING - This is a test call from the business owner"
+            }]
+        }), 200
+
+    # Get customer history
+    customer = DB.find_one("their_customers", {
+        "business_owner_id": owner["id"],
+        "phone_number": from_number
+    })
+    
+    if not customer:
+        return jsonify({
+            "messages": [{
+                "role": "system",
+                "content": f"NEW customer calling from {from_number}. First interaction."
+            }]
+        }), 200
+
+    # Get past calls
+    past_calls = DB.find_many(
+        "interactions",
+        where={"customer_id": customer["id"]},
+        order_by="created_at DESC",
+        limit=3
+    )
+    
+    # Get upcoming bookings
+    bookings = DB.find_many(
+        "bookings",
+        where={"customer_id": customer["id"], "status": "pending"},
+        order_by="booking_date ASC",
+        limit=5
+    )
+    
+    # Build context
+    context = f"RETURNING CUSTOMER: {customer.get('name', 'Customer')}\n"
+    context += f"Phone: {from_number}\n"
+    context += f"Total previous calls: {customer.get('total_calls', 0)}\n\n"
+    
+    if past_calls:
+        context += "RECENT CALLS:\n"
+        for call in past_calls:
+            date = str(call.get("created_at", ""))[:10]
+            summary = call.get("summary", "No details")[:80]
+            context += f"- {date}: {summary}\n"
+    
+    if bookings:
+        context += "\nUPCOMING BOOKINGS:\n"
+        for booking in bookings:
+            context += f"- {booking['booking_date']} at {booking['booking_time']}: {booking.get('service_type', 'Service')}\n"
+    
+    context += "\nProvide personalized service based on their history."
+    
+    return jsonify({
+        "messages": [{
+            "role": "system",
+            "content": context
+        }]
+    }), 200
+
+
+@app.route("/api/vapi/call-ended", methods=["POST", "GET"])
+def customer_call_ended():
+    if request.method == "GET":
+        return "Webhook ready"
+    
+    data = request.get_json(silent=True) or {}
+    message = data.get("message", {})
+    call = message.get("call", {})
+    phoneNumber = message.get("phoneNumber", {})
+    
+    vapi_call_id = call.get("id")
+    to_number = phoneNumber.get("number")
+    from_number = call.get("customer", {}).get("number")
+    transcript = message.get("transcript", "")
+    duration = int(message.get("durationSeconds", 0))
+    recording_url = message.get("recordingUrl", "")
+
+    if not to_number or not from_number or not vapi_call_id:
+        return jsonify({"status": "ok"}), 200
+
+    # Check duplicate
+    existing = DB.find_one("interactions", {"vapi_call_id": vapi_call_id})
+    if existing:
+        return jsonify({"status": "duplicate"}), 200
+
+    owner = DB.find_one("business_owners", {"vapi_phone_number": to_number})
+    if not owner:
+        return jsonify({"status": "ok"}), 200
+
+    # Skip owner's test calls
+    if from_number == owner.get("phone_number"):
+        return jsonify({"status": "owner_test"}), 200
+
+    # Find/create customer
+    customer = DB.find_one("their_customers", {
+        "business_owner_id": owner["id"],
+        "phone_number": from_number
+    })
+    
+    if customer:
+        DB.update("their_customers", {"id": customer["id"]}, {
+            "total_calls": customer.get("total_calls", 0) + 1
+        })
+        customer_id = customer["id"]
+    else:
+        new = DB.insert("their_customers", {
+            "business_owner_id": owner["id"],
+            "phone_number": from_number,
+            "total_calls": 1
+        })
+        customer_id = new["id"]
+
+    # Detect booking/emergency
+    booking_keywords = ["book", "appointment", "schedule", "reserve"]
+    is_booking = any(kw in transcript.lower() for kw in booking_keywords)
+    
+    emergency_keywords = ["burst", "leak", "emergency", "urgent", "flooding"]
+    is_emergency = any(kw in transcript.lower() for kw in emergency_keywords)
+
+    # Save interaction
+    DB.insert("interactions", {
+        "vapi_call_id": vapi_call_id,
+        "business_owner_id": owner["id"],
+        "customer_id": customer_id,
+        "type": "booking" if is_booking else "inbound_call",
+        "caller_phone": from_number,
+        "call_duration": duration,
+        "recording_url": recording_url,
+        "transcript": transcript,
+        "summary": transcript[:200],
+        "is_emergency": is_emergency,
+    })
+
+    if is_emergency:
+        send_sms(to=owner["phone_number"], message=f"🚨 EMERGENCY: {transcript[:100]}")
+
+    return jsonify({"status": "success"}), 200
+
+# =============================================================================
+# CUSTOMER APIs (auth + subscription gate)
+# =============================================================================
+@app.route("/api/customer/dashboard", methods=["GET"])
+
+def get_customer_dashboard():
+    owner, err = require_app_auth()
+    if err:
+        return err
+
+    ok, msg = subscription_gate(owner)
+    if not ok:
+        return jsonify({"error": msg, "needs_payment": True}), 402
+
     try:
-        booking = DB.insert('bookings', booking_data)
+        # ✅ Use Supabase filters instead of broken raw SQL
+        today = datetime.utcnow().date().isoformat()
         
-        send_sms(
-            to=data['customer_phone'],
-            message=f"Booking confirmed: {data['appointment_date']} at {data['appointment_time']}. {data.get('service', '')}"
+        # Get all interactions for this owner
+        interactions = DB.find_many(
+            "interactions",
+            where={"business_owner_id": owner["id"]},
+            order_by="created_at DESC",
+            limit=100
         )
         
-        return jsonify(booking), 201
+        # Filter today's calls in Python
+        today_calls = [i for i in interactions if i.get("created_at", "").startswith(today)]
+        
+        calls_today = len(today_calls)
+        emergencies_today = sum(1 for i in today_calls if i.get("is_emergency"))
+        bookings_today = sum(1 for i in today_calls if i.get("type") == "booking")
+
+        return jsonify({
+            "calls_today": calls_today,
+            "emergencies_today": emergencies_today,
+            "bookings_today": bookings_today,
+            "business_name": owner.get("business_name") or "Your Business",
+            "vapi_phone_number": owner.get("vapi_phone_number"),  # ← ADD THIS
+            "referral_code": owner.get("referral_code"),  # ← ADD THIS
+            "subscription_status": owner.get("subscription_status") or "trialing",
+            "trial_ends_at": owner.get("trial_ends_at"),
+        }), 200
+
     except Exception as e:
+        logger.error(f"Dashboard error: {e}")
         return jsonify({"error": str(e)}), 500
 
 
-@app.route('/api/customer/bookings/<booking_id>', methods=['PUT'])
-def update_booking(booking_id):
-    owner_id = verify_auth()
-    if not owner_id:
-        return jsonify({"error": "Unauthorized"}), 401
-    
-    data = request.json
-    
+@app.route("/api/customer/calls", methods=["GET"])
+def get_customer_calls():
+    owner, err = require_app_auth()
+    if err:
+        return err
+
+    ok, msg = subscription_gate(owner)
+    if not ok:
+        return jsonify({"error": msg, "needs_payment": True}), 402
+
     try:
-        booking = DB.find_one('bookings', {'id': booking_id, 'business_owner_id': owner_id})
-        if not booking:
-            return jsonify({"error": "Not found"}), 404
-        
-        update_data = {
-            'customer_name': data['customer_name'],
-            'customer_phone': data['customer_phone'],
-            'appointment_date': data['appointment_date'],
-            'appointment_time': data['appointment_time'],
-            'service': data.get('service', ''),
-            'notes': data.get('notes', '')
-        }
-        
-        DB.update('bookings', {'id': booking_id}, update_data)
-        
-        return jsonify({"status": "updated"}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route('/api/customer/bookings/<booking_id>', methods=['DELETE'])
-def delete_booking(booking_id):
-    owner_id = verify_auth()
-    if not owner_id:
-        return jsonify({"error": "Unauthorized"}), 401
-    
-    try:
-        booking = DB.find_one('bookings', {'id': booking_id, 'business_owner_id': owner_id})
-        if not booking:
-            return jsonify({"error": "Not found"}), 404
-        
-        DB.delete('bookings', {'id': booking_id})
-        
-        return jsonify({"status": "deleted"}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route('/api/customer/messages', methods=['GET'])
-def get_messages():
-    owner_id = verify_auth()
-    if not owner_id:
-        return jsonify({"error": "Unauthorized"}), 401
-    
-    try:
-        messages = DB.find_many('messages', 
-                               where={'business_owner_id': owner_id}, 
-                               order_by='created_at DESC',
-                               limit=50)
-        return jsonify(messages), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route('/api/customer/messages', methods=['POST'])
-def send_message():
-    owner_id = verify_auth()
-    if not owner_id:
-        return jsonify({"error": "Unauthorized"}), 401
-    
-    data = request.json
-    
-    message_data = {
-        'business_owner_id': owner_id,
-        'customer_phone': data['customer_phone'],
-        'message': data['message'],
-        'direction': 'outbound'
-    }
-    
-    try:
-        message = DB.insert('messages', message_data)
-        send_sms(to=data['customer_phone'], message=data['message'])
-        
-        return jsonify(message), 201
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route('/api/vapi/config', methods=['GET'])
-def get_vapi_config():
-    return jsonify({"public_key": os.getenv("VAPI_PUBLIC_KEY", "")}), 200
-
-# ============================================================================
-# ADMIN - ONBOARDING CALLS LIST ONLY
-# ============================================================================
-
-@app.route('/admin/login')
-def admin_login_page():
-    return render_template('admin_login.html')
-
-@app.route('/admin/dashboard')
-def admin_dashboard_page():
-    return render_template('admin_dashboard.html')
-
-@app.route('/admin')
-def admin_redirect():
-    return render_template('admin_login.html')
-
-ADMIN_PHONE = os.getenv('ADMIN_PHONE')
-
-@app.route("/api/admin/auth/send-otp", methods=["POST"])
-def admin_send_otp():
-    data = request.json or {}
-    phone = (data.get("phone") or "").strip()
-    
-    if not phone:
-        return jsonify({"error": "Phone number required"}), 400
-    
-    if phone != ADMIN_PHONE:
-        return jsonify({"error": "Access denied. Not an admin number."}), 403
-    
-    try:
-        if supabase:
-            supabase.auth.sign_in_with_otp({"phone": phone})
-        return jsonify({"status": "OTP sent"}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/admin/auth/verify-otp", methods=["POST"])
-def admin_verify_otp():
-    data = request.json or {}
-    phone = (data.get("phone") or "").strip()
-    otp = (data.get("otp") or "").strip()
-    
-    if not phone or not otp:
-        return jsonify({"error": "Phone and OTP required"}), 400
-    
-    if phone != ADMIN_PHONE:
-        return jsonify({"error": "Access denied"}), 403
-    
-    try:
-        if supabase:
-            response = supabase.auth.verify_otp({
-                "phone": phone,
-                "token": otp,
-                "type": "sms"
-            })
-            
-            if not response.user:
-                return jsonify({"error": "Invalid OTP"}), 401
-            
-            return jsonify({
-                "token": response.session.access_token,
-                "is_admin": True
-            }), 200
-        else:
-            return jsonify({"error": "Supabase not configured"}), 500
-    except Exception as e:
-        return jsonify({"error": str(e)}), 401
-
-
-def verify_admin_auth():
-    auth_header = request.headers.get('Authorization')
-    if not auth_header or not auth_header.startswith('Bearer '):
-        return False
-    
-    token = auth_header.split(' ')[1]
-    try:
-        if supabase:
-            user = supabase.auth.get_user(token)
-            if user and user.user.phone == ADMIN_PHONE:
-                return True
-    except:
-        return False
-    return False
-
-
-@app.route('/api/admin/onboarding-calls', methods=['GET'])
-def get_all_onboarding_calls():
-    if not verify_admin_auth():
-        return jsonify({"error": "Unauthorized"}), 401
-    
-    try:
-        calls = DB.find_many('onboarding_calls', 
-                            order_by='created_at DESC',
-                            limit=100)
+        limit = int(request.args.get("limit", 20))
+        calls = DB.find_many(
+            "interactions",
+            where={"business_owner_id": owner["id"]},
+            order_by="created_at DESC",
+            limit=limit,
+        )
         return jsonify(calls), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
-@app.route('/health')
+@app.route("/health")
 def health():
     return jsonify({"status": "healthy"}), 200
 
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+if __name__ == "__main__":
+    port = 5000
+    app.run(debug=True, host="0.0.0.0", port=port)

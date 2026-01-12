@@ -1,40 +1,66 @@
-# main.py - TrySpeak Voice System (Twilio + ElevenLabs + Gemini)
-# Replaces VAPI with custom voice agent
+# =============================================================================
+# COMPLETE TRYSPEAK SYSTEM
+# - OTP Login
+# - Onboarding with 14-day trial
+# - Referral system (£25 off)
+# - Manager Mode (reads last call + appointments)
+# - Receptionist Mode (new callers)
+# - Booking appointments via voice
+# - Editing appointments via voice (Manager Mode)
+# - Call list with AI summaries
+# - Appointment calendar
+# - Dashboard with stats
+# - Stripe subscription (£75/month)
+# - Twilio voice webhooks
+# - Google Speech-to-Text
+# - Google Gemini AI
+# - Google Text-to-Speech
+# =============================================================================
+
+import os
+import json
+import base64
+import asyncio
+import logging
+import queue
+from datetime import datetime, timedelta
+from threading import Thread
 
 from flask import Flask, request, jsonify, render_template
 from flask_cors import CORS
 from flask_sock import Sock
 from dotenv import load_dotenv
-import os
-from datetime import datetime, timedelta
-import jwt
-import stripe
-from supabase import create_client
-from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
-import logging
-import json
-import base64
-import asyncio
-from threading import Thread
-import queue
 
-# Google services
+# Supabase for OTP
+from supabase import create_client
+
+# Google AI Stack
 from google import genai
 from google.genai import types
 from google.cloud import speech_v1 as speech
-
-# ElevenLabs
-from elevenlabs import VoiceSettings
-from elevenlabs.client import ElevenLabs
+from google.cloud import texttospeech
 
 # Twilio
 from twilio.twiml.voice_response import VoiceResponse, Connect, Stream
+from twilio.rest import Client as TwilioClient
 
+# Stripe
+import stripe
+
+# Auth
+import jwt
+from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
+
+# Services
 from services.sms_service import send_sms
 from services.cockroachdb_service import DB
 
-logger = logging.getLogger(__name__)
+# =============================================================================
+# SETUP
+# =============================================================================
 load_dotenv()
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 CORS(app)
@@ -45,6 +71,7 @@ sock = Sock(app)
 # =============================================================================
 AUTH_SECRET = os.getenv("AUTH_SECRET", "change-me")
 serializer = URLSafeTimedSerializer(AUTH_SECRET)
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN")
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY")
@@ -57,21 +84,17 @@ STRIPE_PRICE_ID = os.getenv("STRIPE_PRICE_ID")
 APP_BASE_URL = os.getenv("APP_BASE_URL", "https://tryspeak.site")
 stripe.api_key = STRIPE_SECRET_KEY
 
-# Voice AI Config
-ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+twilio_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) if TWILIO_ACCOUNT_SID else None
 
-# Initialize services
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
-elevenlabs_client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
 
-# Julian voice ID (British male)
-JULIAN_VOICE_ID = "yBUZAhdyZ3CJHqXPZ3zF"
+tts_client = texttospeech.TextToSpeechClient()
 
 # =============================================================================
-# HELPER FUNCTIONS (Same as before)
+# HELPER FUNCTIONS
 # =============================================================================
 def get_bearer_token():
     auth = request.headers.get("Authorization", "")
@@ -79,10 +102,13 @@ def get_bearer_token():
         return auth.split(" ", 1)[1].strip()
     return request.headers.get("X-Auth-Token") or None
 
+
 def require_app_auth():
+    """Validates app token and returns owner row"""
     token = get_bearer_token()
     if not token:
         return None, (jsonify({"error": "Unauthorized"}), 401)
+
     try:
         payload = serializer.loads(token, max_age=60 * 60 * 24 * 14)
         owner_id = payload.get("owner_id")
@@ -90,38 +116,46 @@ def require_app_auth():
             return None, (jsonify({"error": "Unauthorized"}), 401)
     except (SignatureExpired, BadSignature):
         return None, (jsonify({"error": "Unauthorized"}), 401)
-    
+
     owner = DB.find_one("business_owners", {"id": owner_id})
     if not owner:
         return None, (jsonify({"error": "Unauthorized"}), 401)
     return owner, None
 
+
 def subscription_gate(owner):
+    """Check if user can access (trial or active subscription)"""
     if owner.get("status") != "active":
         return False, "Account inactive"
-    
+
     sub = owner.get("subscription_status") or "trialing"
     if sub == "active":
         return True, None
-    
+
     if sub == "trialing":
         trial_ends = owner.get("trial_ends_at")
         if not trial_ends:
             return True, None
+
         if isinstance(trial_ends, str):
             try:
                 trial_ends = datetime.fromisoformat(trial_ends.replace("Z", "+00:00")).replace(tzinfo=None)
             except:
                 trial_ends = None
+
         if not trial_ends:
             return True, None
+
         if datetime.utcnow() <= trial_ends.replace(tzinfo=None):
             return True, None
+
         return False, "Trial ended"
+
     return False, "Subscription inactive"
 
+
 # =============================================================================
-# VOICE AI HANDLER
+# VOICE CALL HANDLER CLASS
 # =============================================================================
 class VoiceCallHandler:
     def __init__(self, call_sid, from_number, to_number):
@@ -133,8 +167,9 @@ class VoiceCallHandler:
         self.owner = None
         self.customer = None
         self.conversation_history = []
+        self.is_owner = False
         
-        # Load owner & customer context
+        # Load context
         self.load_context()
     
     def load_context(self):
@@ -144,11 +179,11 @@ class VoiceCallHandler:
             logger.error(f"No owner found for number {self.to_number}")
             return
         
-        # Check if caller is the owner
+        # Check if caller is the owner (Manager Mode)
         self.is_owner = (self.from_number == self.owner.get("phone_number"))
         
         if not self.is_owner:
-            # Load customer history
+            # Load customer history for Receptionist Mode
             self.customer = DB.find_one("their_customers", {
                 "business_owner_id": self.owner["id"],
                 "phone_number": self.from_number
@@ -175,48 +210,69 @@ class VoiceCallHandler:
                 self.customer['bookings'] = bookings
     
     def get_system_prompt(self):
-        """Generate system prompt based on caller type"""
+        """Generate system prompt based on caller type (Manager vs Receptionist Mode)"""
         now = datetime.utcnow()
         current_date = now.strftime("%A, %d %B %Y")
         current_time = now.strftime("%H:%M")
         
+        # Get today's appointment list
+        today_bookings = DB.find_many(
+            "bookings",
+            where={
+                "business_owner_id": self.owner["id"],
+                "booking_date": now.strftime("%Y-%m-%d"),
+                "status": "pending"
+            },
+            order_by="booking_time ASC"
+        )
+        
+        appointments_today = ", ".join([
+            f"{b['customer_name']} at {b['booking_time']}" 
+            for b in today_bookings
+        ]) if today_bookings else "No appointments today"
+        
         if self.is_owner:
-            # Owner calling - give business intel
-            next_booking = DB.find_one(
-                "bookings",
-                where={"business_owner_id": self.owner["id"], "status": "pending"},
-                order_by="booking_date ASC"
-            )
-            
-            schedule = "The calendar is blissfully empty, Gaffer."
-            if next_booking:
-                schedule = f"Your next appointment is {next_booking.get('customer_name')} at {next_booking.get('booking_time')} on {next_booking.get('booking_date')}."
-            
-            return f"""You are Julian, the loyal British Butler AI receptionist for {self.owner.get('business_name')}.
+            # ==========================================
+            # MANAGER MODE
+            # ==========================================
+            return f"""You are Julian, the loyal British Butler AI for {self.owner.get('business_name')}.
 
 CURRENT DATE/TIME: {current_date} at {current_time}
 
-TONE: Dry English wit, professional but warm. Use phrases like 'Right then', 'Gaffer', 'Lovely stuff', and 'Sorted'.
+MANAGER MODE - The boss is calling.
 
-CONTEXT: The boss is calling to check in.
-1. Greet warmly (e.g., 'Ah, the Gaffer—couldn't stay away, could you?')
-2. Provide today's intel: {schedule}
-3. Answer questions about bookings, schedule, or business
-4. Be helpful but keep the British humor
+TODAY'S SCHEDULE: {appointments_today}
 
-RULES:
-- Use metric/British terminology
-- Keep responses concise (2-3 sentences max)
-- If asked to book something, extract: name, phone, date, time, service
-- Use JSON format for booking: {{"action": "create_booking", "customer_name": "...", "customer_phone": "...", "booking_date": "YYYY-MM-DD", "booking_time": "HH:MM", "service_type": "..."}}
+YOUR JOB:
+1. Greet warmly (e.g., 'Ah, the Gaffer—checking in on the troops?')
+2. Provide today's schedule
+3. Help EDIT appointments if requested
+4. Answer questions about bookings and customers
+5. Use British wit and professional tone
+
+EDITING APPOINTMENTS:
+When the boss wants to change a meeting time, return JSON:
+{{"action": "edit_booking", "customer_name": "John Smith", "old_time": "14:00", "new_time": "15:30"}}
+
+TONE: Dry English wit. Use phrases like 'Right then', 'Gaffer', 'Lovely stuff', 'Sorted'.
 """
         else:
-            # Customer calling
+            # ==========================================
+            # RECEPTIONIST MODE
+            # ==========================================
             customer_context = ""
             if self.customer:
+                # Returning customer - reference last call
                 customer_context = f"RETURNING CUSTOMER: {self.customer.get('name', 'Customer')}\n"
                 customer_context += f"Total previous calls: {self.customer.get('total_calls', 0)}\n"
                 
+                # Include last call summary
+                if self.customer.get('past_calls'):
+                    last_call = self.customer['past_calls'][0]
+                    last_summary = last_call.get('summary', '')[:150]
+                    customer_context += f"\nLAST CONVERSATION: {last_summary}\n"
+                
+                # Include upcoming bookings
                 if self.customer.get('bookings'):
                     customer_context += "\nUPCOMING BOOKINGS:\n"
                     for b in self.customer['bookings']:
@@ -228,30 +284,38 @@ RULES:
 
 CURRENT DATE/TIME: {current_date} at {current_time}
 
+RECEPTIONIST MODE
+
 {customer_context}
+
+TODAY'S SCHEDULE (for reference): {appointments_today}
 
 YOUR JOB:
 1. Answer questions about services, pricing, availability
 2. Help customers book appointments
-3. Take messages for the owner
-4. Handle emergencies appropriately
+3. Check availability against today's schedule
+4. Take messages for the owner
+5. Handle emergencies appropriately
 
 BOOKING PROCESS:
 - Ask for: full name, phone number, preferred date/time, type of service
 - If they say "tomorrow", that means {(now + timedelta(days=1)).strftime('%A, %d %B')}
-- When you have all details, return JSON: {{"action": "create_booking", "customer_name": "...", "customer_phone": "...", "booking_date": "YYYY-MM-DD", "booking_time": "HH:MM", "service_type": "..."}}
+- Check against existing appointments to avoid double-booking
+- When you have all details, return JSON:
+{{"action": "create_booking", "customer_name": "...", "customer_phone": "...", "booking_date": "YYYY-MM-DD", "booking_time": "HH:MM", "service_type": "..."}}
 
 EMERGENCY KEYWORDS: If you hear "burst pipe", "leak", "flooding", "no power", "sparks", "gas leak", mark as EMERGENCY
 
-TONE: Professional, warm, British accent. Keep responses under 3 sentences.
+TONE: Professional, warm, British accent. Keep responses under 3 sentences unless providing detailed info.
 """
     
     async def process_speech(self, audio_data):
         """Process incoming speech and generate response"""
         try:
-            # Speech-to-Text using Google Cloud Speech
-            # Works automatically on Cloud Run (no JSON key needed)
-            client = speech.SpeechClient()
+            # ==========================================
+            # SPEECH-TO-TEXT (Google Cloud Speech)
+            # ==========================================
+            stt_client = speech.SpeechClient()
             audio = speech.RecognitionAudio(content=audio_data)
             config = speech.RecognitionConfig(
                 encoding=speech.RecognitionConfig.AudioEncoding.MULAW,
@@ -259,46 +323,66 @@ TONE: Professional, warm, British accent. Keep responses under 3 sentences.
                 language_code="en-GB",
             )
             
-            response = client.recognize(config=config, audio=audio)
+            response = stt_client.recognize(config=config, audio=audio)
             
             if not response.results:
                 return None
             
             user_text = response.results[0].alternatives[0].transcript
+            
+            if not user_text or len(user_text.strip()) < 2:
+                return None
+                
             self.transcript.append({"role": "user", "content": user_text})
             logger.info(f"User said: {user_text}")
             
-            # Get AI response from Gemini
+            # ==========================================
+            # AI RESPONSE (Google Gemini)
+            # ==========================================
             ai_response = await self.get_gemini_response(user_text)
             self.transcript.append({"role": "assistant", "content": ai_response})
             
-            # Check for booking action
-            if '"action": "create_booking"' in ai_response:
-                await self.handle_booking(ai_response)
+            # ==========================================
+            # ACTION DETECTION (Booking/Editing)
+            # ==========================================
+            if '"action":' in ai_response:
+                await self.handle_action(ai_response)
                 # Remove JSON from spoken response
                 ai_response = ai_response.split('{"action"')[0].strip()
             
-            # Convert to speech using ElevenLabs
-            audio = elevenlabs_client.text_to_speech.convert(
-                voice_id=JULIAN_VOICE_ID,
-                text=ai_response,
-                model_id="eleven_multilingual_v2",
-                voice_settings=VoiceSettings(
-                    stability=0.5,
-                    similarity_boost=0.75,
-                    style=0.5,
-                    use_speaker_boost=True
-                )
+            # ==========================================
+            # TEXT-TO-SPEECH (Google Cloud TTS)
+            # ==========================================
+            input_text = texttospeech.SynthesisInput(text=ai_response)
+            
+            # British male voice
+            voice = texttospeech.VoiceSelectionParams(
+                language_code="en-GB",
+                name="en-GB-Neural2-B",  # British male
+                ssml_gender=texttospeech.SsmlVoiceGender.MALE
             )
             
-            return audio
+            audio_config = texttospeech.AudioConfig(
+                audio_encoding=texttospeech.AudioEncoding.MULAW,
+                sample_rate_hertz=8000
+            )
+            
+            tts_response = tts_client.synthesize_speech(
+                request={
+                    "input": input_text,
+                    "voice": voice,
+                    "audio_config": audio_config
+                }
+            )
+            
+            return tts_response.audio_content
             
         except Exception as e:
             logger.error(f"Speech processing error: {e}")
             return None
     
     async def get_gemini_response(self, user_text):
-        """Get response from Gemini"""
+        """Get response from Gemini AI"""
         try:
             # Build conversation with system prompt first
             contents = [types.Content(
@@ -337,54 +421,80 @@ TONE: Professional, warm, British accent. Keep responses under 3 sentences.
             logger.error(f"Gemini error: {e}")
             return "I apologize, I'm having a technical moment. Could you repeat that?"
     
-    async def handle_booking(self, response_text):
-        """Extract booking from AI response and save to DB"""
+    async def handle_action(self, response_text):
+        """Handle booking/editing actions from AI response"""
         try:
             # Extract JSON from response
             json_start = response_text.find('{"action"')
             json_str = response_text[json_start:]
-            booking_data = json.loads(json_str)
+            action_data = json.loads(json_str)
             
-            if booking_data.get("action") != "create_booking":
-                return
+            action = action_data.get("action")
             
-            # Find or create customer
-            customer = DB.find_one("their_customers", {
-                "business_owner_id": self.owner["id"],
-                "phone_number": booking_data.get("customer_phone", self.from_number)
-            })
-            
-            if not customer:
-                customer = DB.insert("their_customers", {
+            if action == "create_booking":
+                # ==========================================
+                # CREATE BOOKING
+                # ==========================================
+                # Find or create customer
+                customer = DB.find_one("their_customers", {
                     "business_owner_id": self.owner["id"],
-                    "phone_number": booking_data.get("customer_phone", self.from_number),
-                    "name": booking_data.get("customer_name", "Unknown"),
-                    "total_calls": 0
+                    "phone_number": action_data.get("customer_phone", self.from_number)
                 })
+                
+                if not customer:
+                    customer = DB.insert("their_customers", {
+                        "business_owner_id": self.owner["id"],
+                        "phone_number": action_data.get("customer_phone", self.from_number),
+                        "name": action_data.get("customer_name", "Unknown"),
+                        "total_calls": 0
+                    })
+                
+                # Create booking
+                DB.insert("bookings", {
+                    "business_owner_id": self.owner["id"],
+                    "customer_id": customer["id"],
+                    "customer_name": action_data.get("customer_name"),
+                    "customer_phone": action_data.get("customer_phone", self.from_number),
+                    "booking_date": action_data.get("booking_date"),
+                    "booking_time": action_data.get("booking_time"),
+                    "service_type": action_data.get("service_type", "General"),
+                    "notes": action_data.get("notes", ""),
+                    "status": "pending"
+                })
+                
+                # Notify owner
+                send_sms(
+                    to=self.owner["phone_number"],
+                    message=f"📅 NEW BOOKING\n{action_data.get('customer_name')}\n{action_data.get('booking_date')} at {action_data.get('booking_time')}\n{action_data.get('service_type')}"
+                )
+                
+                logger.info(f"Booking created: {action_data}")
             
-            # Create booking
-            DB.insert("bookings", {
-                "business_owner_id": self.owner["id"],
-                "customer_id": customer["id"],
-                "customer_name": booking_data.get("customer_name"),
-                "customer_phone": booking_data.get("customer_phone", self.from_number),
-                "booking_date": booking_data.get("booking_date"),
-                "booking_time": booking_data.get("booking_time"),
-                "service_type": booking_data.get("service_type", "General"),
-                "notes": "",
-                "status": "pending"
-            })
-            
-            # Notify owner
-            send_sms(
-                to=self.owner["phone_number"],
-                message=f"📅 NEW BOOKING\n{booking_data.get('customer_name')}\n{booking_data.get('booking_date')} at {booking_data.get('booking_time')}\n{booking_data.get('service_type')}"
-            )
-            
-            logger.info(f"Booking created: {booking_data}")
-            
+            elif action == "edit_booking":
+                # ==========================================
+                # EDIT BOOKING (Manager Mode)
+                # ==========================================
+                customer_name = action_data.get("customer_name")
+                old_time = action_data.get("old_time")
+                new_time = action_data.get("new_time")
+                
+                # Find booking by customer name and old time
+                booking = DB.find_one("bookings", {
+                    "business_owner_id": self.owner["id"],
+                    "customer_name": customer_name,
+                    "booking_time": old_time,
+                    "status": "pending"
+                })
+                
+                if booking:
+                    DB.update("bookings", {"id": booking["id"]}, {
+                        "booking_time": new_time
+                    })
+                    
+                    logger.info(f"Booking edited: {customer_name} moved from {old_time} to {new_time}")
+                
         except Exception as e:
-            logger.error(f"Booking error: {e}")
+            logger.error(f"Action handling error: {e}")
     
     def save_call_log(self, duration):
         """Save call to database after completion"""
@@ -412,6 +522,22 @@ TONE: Professional, warm, British accent. Keep responses under 3 sentences.
             # Build full transcript
             full_transcript = "\n".join([f"{m['role']}: {m['content']}" for m in self.transcript])
             
+            # ==========================================
+            # GENERATE AI SUMMARY
+            # ==========================================
+            try:
+                summary_prompt = f"Summarize this call in 1-2 sentences:\n{full_transcript}"
+                summary_response = gemini_client.models.generate_content(
+                    model='gemini-2.0-flash-exp',
+                    contents=[types.Content(
+                        role="user",
+                        parts=[types.Part(text=summary_prompt)]
+                    )]
+                )
+                ai_summary = summary_response.text
+            except:
+                ai_summary = full_transcript[:200]
+            
             # Detect emergency
             emergency_keywords = ["emergency", "burst", "leak", "flooding", "sparks", "gas leak"]
             is_emergency = any(kw in full_transcript.lower() for kw in emergency_keywords)
@@ -429,7 +555,7 @@ TONE: Professional, warm, British accent. Keep responses under 3 sentences.
                 "call_duration": duration,
                 "recording_url": "",
                 "transcript": full_transcript,
-                "summary": full_transcript[:200],
+                "summary": ai_summary,
                 "is_emergency": is_emergency
             })
             
@@ -444,10 +570,11 @@ TONE: Professional, warm, British accent. Keep responses under 3 sentences.
         except Exception as e:
             logger.error(f"Call log error: {e}")
 
+
 # =============================================================================
 # TWILIO WEBHOOKS
 # =============================================================================
-@app.route("/api/twilio/voice", methods=["POST", "GET"])
+@app.route("/api/twilio/voice", methods=["POST"])
 def twilio_voice():
     """Handle incoming call from Twilio"""
     from_number = request.form.get("From")
@@ -464,6 +591,7 @@ def twilio_voice():
     response.append(connect)
     
     return str(response), 200, {'Content-Type': 'text/xml'}
+
 
 @sock.route('/api/twilio/stream')
 def twilio_stream(ws):
@@ -495,14 +623,23 @@ def twilio_stream(ws):
                 
                 # Send initial greeting
                 greeting = "Hello! How can I help you today?"
-                audio = elevenlabs_client.text_to_speech.convert(
-                    voice_id=JULIAN_VOICE_ID,
-                    text=greeting,
-                    model_id="eleven_multilingual_v2"
+                
+                input_text = texttospeech.SynthesisInput(text=greeting)
+                voice = texttospeech.VoiceSelectionParams(
+                    language_code="en-GB",
+                    name="en-GB-Neural2-B",
+                    ssml_gender=texttospeech.SsmlVoiceGender.MALE
+                )
+                audio_config = texttospeech.AudioConfig(
+                    audio_encoding=texttospeech.AudioEncoding.MULAW,
+                    sample_rate_hertz=8000
+                )
+                tts_response = tts_client.synthesize_speech(
+                    request={"input": input_text, "voice": voice, "audio_config": audio_config}
                 )
                 
                 # Send audio to Twilio
-                audio_base64 = base64.b64encode(audio).decode('utf-8')
+                audio_base64 = base64.b64encode(tts_response.audio_content).decode('utf-8')
                 ws.send(json.dumps({
                     "event": "media",
                     "media": {"payload": audio_base64}
@@ -537,11 +674,10 @@ def twilio_stream(ws):
     finally:
         ws.close()
 
-# =============================================================================
-# ALL OTHER ROUTES (Same as original app.py)
-# =============================================================================
 
-# HTML Pages
+# =============================================================================
+# HTML PAGES
+# =============================================================================
 @app.route("/")
 def home():
     return render_template("index.html")
@@ -562,205 +698,13 @@ def calls_page():
 def admin_page():
     return render_template("admin_dashboard.html")
 
-# =============================================================================
-# ADMIN & ONBOARDING
-# =============================================================================
-@app.route("/admin", methods=["GET", "POST"])
-def admin():
-    token_ok = False
-    if request.method == "POST":
-        token = request.form.get("token")
-        if token and token == os.getenv("ADMIN_TOKEN"):
-            token_ok = True
-
-    if not token_ok:
-        return render_template("admin_dashboard.html", logged_in=False)
-
-    calls = DB.find_many("onboarding_calls", order_by="created_at DESC", limit=50)
-    return render_template("admin_dashboard.html", logged_in=True, calls=calls)
-
-
-@app.route("/api/admin/pending-onboardings", methods=["GET"])
-def get_pending_onboardings():
-    try:
-        pending = DB.find_many(
-            "onboarding_calls",
-            where={"status": "pending"},
-            order_by="created_at ASC",
-        )
-
-        for call in pending:
-            created = call.get("created_at")
-            if created:
-                waiting_hours = (datetime.utcnow() - created).total_seconds() / 3600
-                call["hours_waiting"] = round(waiting_hours, 1)
-
-        return jsonify(pending), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/admin/onboarding/<onboarding_id>", methods=["GET"])
-def get_onboarding_detail(onboarding_id):
-    try:
-        onboarding = DB.find_one("onboarding_calls", {"id": onboarding_id})
-        if not onboarding:
-            return jsonify({"error": "Not found"}), 404
-        return jsonify(onboarding), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/admin/onboarding/<onboarding_id>/create-assistant", methods=["POST", "GET"])
-def create_assistant_from_onboarding(onboarding_id):
-    try:
-        onboarding = DB.find_one("onboarding_calls", {"id": onboarding_id})
-        if not onboarding:
-            return jsonify({"error": "Not found"}), 404
-
-        business_type = onboarding["business_type"]
-        business_name = onboarding["signup_name"]
-        
-        # For Twilio system - admin needs to manually buy Twilio number
-        # This endpoint now just creates the business owner record
-        
-        referral_code = f"{business_name.upper().replace(' ', '-')}-{onboarding['signup_phone'][-4:]}"
-        referred_by_code = None
-
-        # pull referral used at signup
-        signup = DB.find_one("signups", {"phone_number": onboarding["signup_phone"]})
-        if signup:
-            referred_by_code = signup.get("referral_code_used")
-
-        owner_data = {
-            "email": onboarding.get("signup_email", ""),
-            "phone_number": onboarding["signup_phone"],
-            "business_name": business_name,
-            "business_type": business_type,
-            "twilio_phone_number": None,  # Admin needs to assign manually
-            "referral_code": referral_code,
-            "referred_by_code": referred_by_code,
-            "subscription_status": "trialing",
-            "trial_ends_at": datetime.utcnow() + timedelta(days=14),
-            "status": "active",
-        }
-
-        owner = DB.insert("business_owners", owner_data)
-
-        DB.update(
-            "onboarding_calls",
-            {"id": onboarding_id},
-            {"status": "completed", "business_owner_id": owner["id"]},
-        )
-
-        # SMS will be sent after admin assigns Twilio number
-        send_sms(
-            to=onboarding["signup_phone"],
-            message=f"""Account created! 🎉
-
-An admin will assign your phone number shortly.
-
-Login: {APP_BASE_URL}/login
-(Use OTP on your mobile)
-
-Referral: {referral_code}""",
-        )
-
-        return jsonify({
-            "status": "success", 
-            "message": "Account created. Admin needs to assign Twilio number manually.",
-            "owner_id": owner["id"]
-        }), 200
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/admin/assign-number", methods=["POST", "GET"])
-def assign_twilio_number():
-    """Admin assigns Twilio number to business owner"""
-    data = request.json or {}
-    owner_id = data.get("owner_id")
-    twilio_number = data.get("twilio_number")
-    
-    if not owner_id or not twilio_number:
-        return jsonify({"error": "Missing owner_id or twilio_number"}), 400
-    
-    owner = DB.find_one("business_owners", {"id": owner_id})
-    if not owner:
-        return jsonify({"error": "Owner not found"}), 404
-    
-    DB.update("business_owners", {"id": owner_id}, {"twilio_phone_number": twilio_number})
-    
-    # Send SMS with number
-    send_sms(
-        to=owner["phone_number"],
-        message=f"""Your AI receptionist is ready! 🎉
-
-Forward calls to: {twilio_number}
-
-Login: {APP_BASE_URL}/login
-
-Your referral code: {owner.get('referral_code')}"""
-    )
-    
-    return jsonify({"status": "success", "phone_number": twilio_number}), 200
-
 
 # =============================================================================
-# REFERRAL SYSTEM
+# AUTH - OTP LOGIN
 # =============================================================================
-@app.route("/api/referrals/check", methods=["POST", "GET"])
-def check_referral_code():
-    """Check if referral code is valid and return referrer info"""
-    data = request.json or {}
-    code = data.get("code", "").strip().upper()
-    
-    if not code:
-        return jsonify({"valid": False}), 200
-    
-    referrer = DB.find_one("business_owners", {"referral_code": code})
-    if referrer:
-        return jsonify({
-            "valid": True,
-            "referrer_name": referrer.get("business_name"),
-            "discount": 25  # £25 off first month
-        }), 200
-    
-    return jsonify({"valid": False}), 200
-
-
-@app.route("/api/referrals/stats", methods=["GET"])
-def get_referral_stats():
-    """Get referral statistics for logged-in user"""
-    owner, err = require_app_auth()
-    if err:
-        return err
-    
-    # Count referrals
-    referrals = DB.find_many("business_owners", {"referred_by_code": owner.get("referral_code")})
-    
-    # Calculate earnings (£25 per referral)
-    total_referrals = len(referrals)
-    total_earnings = total_referrals * 25
-    
-    return jsonify({
-        "referral_code": owner.get("referral_code"),
-        "total_referrals": total_referrals,
-        "total_earnings": total_earnings,
-        "referrals": [{
-            "business_name": r.get("business_name"),
-            "created_at": r.get("created_at"),
-            "status": r.get("subscription_status")
-        } for r in referrals]
-    }), 200
-
-
-# =============================================================================
-# AUTH
-# =============================================================================
-@app.route("/api/auth/request-otp", methods=["POST", "GET"])
+@app.route("/api/auth/request-otp", methods=["POST"])
 def api_auth_request_otp():
+    """Send OTP to user's phone"""
     data = request.json or {}
     phone = (data.get("phone") or "").strip()
     
@@ -777,8 +721,10 @@ def api_auth_request_otp():
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
-@app.route("/api/auth/verify-otp", methods=["POST", "GET"])
+
+@app.route("/api/auth/verify-otp", methods=["POST"])
 def api_auth_verify_otp():
+    """Verify OTP and return auth token"""
     data = request.json or {}
     phone = (data.get("phone") or "").strip()
     otp = (data.get("otp") or "").strip()
@@ -806,9 +752,178 @@ def api_auth_verify_otp():
         logger.error(f"OTP verify error: {e}")
         return jsonify({"error": str(e)}), 400
 
-# Dashboard APIs
+
+# =============================================================================
+# ONBOARDING & REGISTRATION
+# =============================================================================
+@app.route("/api/admin/onboarding/<onboarding_id>/create-account", methods=["POST"])
+def create_account_from_onboarding(onboarding_id):
+    """Admin creates account with 14-day free trial and referral code"""
+    try:
+        onboarding = DB.find_one("onboarding_calls", {"id": onboarding_id})
+        if not onboarding:
+            return jsonify({"error": "Not found"}), 404
+
+        business_name = onboarding["signup_name"]
+        business_type = onboarding["business_type"]
+        
+        # Generate referral code
+        referral_code = f"{business_name.upper().replace(' ', '-')}-{onboarding['signup_phone'][-4:]}"
+        
+        # Check who referred them
+        referred_by_code = None
+        signup = DB.find_one("signups", {"phone_number": onboarding["signup_phone"]})
+        if signup:
+            referred_by_code = signup.get("referral_code_used")
+        
+        # Create business owner with 14-day trial
+        owner_data = {
+            "email": onboarding.get("signup_email", ""),
+            "phone_number": onboarding["signup_phone"],
+            "business_name": business_name,
+            "business_type": business_type,
+            "twilio_phone_number": None,  # Admin assigns later
+            "referral_code": referral_code,
+            "referred_by_code": referred_by_code,
+            "subscription_status": "trialing",
+            "trial_ends_at": datetime.utcnow() + timedelta(days=14),
+            "status": "active",
+        }
+        
+        owner = DB.insert("business_owners", owner_data)
+        
+        DB.update(
+            "onboarding_calls",
+            {"id": onboarding_id},
+            {"status": "completed", "business_owner_id": owner["id"]},
+        )
+        
+        # SMS notification
+        send_sms(
+            to=onboarding["signup_phone"],
+            message=f"""Account created! 🎉
+
+14-day FREE trial starts now.
+
+Admin will assign your phone number.
+
+Your referral code: {referral_code}
+Each referral = £25 off!
+
+Login: {APP_BASE_URL}/login"""
+        )
+        
+        return jsonify({
+            "status": "success",
+            "owner_id": owner["id"],
+            "referral_code": referral_code,
+            "trial_ends": owner_data["trial_ends_at"].isoformat()
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/admin/assign-number", methods=["POST"])
+def assign_twilio_number():
+    """Admin manually assigns Twilio number to business owner"""
+    data = request.json or {}
+    owner_id = data.get("owner_id")
+    twilio_number = data.get("twilio_number")
+    
+    if not owner_id or not twilio_number:
+        return jsonify({"error": "Missing owner_id or twilio_number"}), 400
+    
+    owner = DB.find_one("business_owners", {"id": owner_id})
+    if not owner:
+        return jsonify({"error": "Owner not found"}), 404
+    
+    DB.update("business_owners", {"id": owner_id}, {"twilio_phone_number": twilio_number})
+    
+    # Configure Twilio webhook
+    if twilio_client:
+        try:
+            twilio_client.incoming_phone_numbers.list(phone_number=twilio_number)[0].update(
+                voice_url=f"{APP_BASE_URL}/api/twilio/voice",
+                voice_method='POST'
+            )
+        except:
+            pass
+    
+    # Send SMS with number
+    send_sms(
+        to=owner["phone_number"],
+        message=f"""Your AI receptionist is ready! 🎉
+
+Forward calls to: {twilio_number}
+
+Dial *21*{twilio_number}# to activate call forwarding.
+
+Login: {APP_BASE_URL}/login
+
+Referral code: {owner.get('referral_code')}"""
+    )
+    
+    return jsonify({"status": "success", "phone_number": twilio_number}), 200
+
+
+# =============================================================================
+# REFERRAL SYSTEM
+# =============================================================================
+@app.route("/api/referrals/check", methods=["POST"])
+def check_referral_code():
+    """Validate referral code and return referrer info"""
+    data = request.json or {}
+    code = data.get("code", "").strip().upper()
+    
+    if not code:
+        return jsonify({"valid": False}), 200
+    
+    referrer = DB.find_one("business_owners", {"referral_code": code})
+    if referrer:
+        return jsonify({
+            "valid": True,
+            "referrer_name": referrer.get("business_name"),
+            "discount": 25  # £25 off first month for BOTH parties
+        }), 200
+    
+    return jsonify({"valid": False}), 200
+
+
+@app.route("/api/referrals/stats", methods=["GET"])
+def get_referral_stats():
+    """Get referral statistics and earnings"""
+    owner, err = require_app_auth()
+    if err:
+        return err
+    
+    # Count referrals
+    referrals = DB.find_many("business_owners", {"referred_by_code": owner.get("referral_code")})
+    
+    # Calculate earnings (£25 per active referral)
+    active_referrals = [r for r in referrals if r.get("subscription_status") == "active"]
+    total_referrals = len(referrals)
+    total_earnings = len(active_referrals) * 25
+    
+    return jsonify({
+        "referral_code": owner.get("referral_code"),
+        "total_referrals": total_referrals,
+        "active_referrals": len(active_referrals),
+        "total_earnings": total_earnings,
+        "referrals": [{
+            "business_name": r.get("business_name"),
+            "created_at": r.get("created_at"),
+            "status": r.get("subscription_status")
+        } for r in referrals]
+    }), 200
+
+
+# =============================================================================
+# DASHBOARD APIS
+# =============================================================================
 @app.route("/api/customer/dashboard", methods=["GET"])
 def get_customer_dashboard():
+    """Get dashboard stats"""
     owner, err = require_app_auth()
     if err:
         return err
@@ -819,6 +934,8 @@ def get_customer_dashboard():
     
     try:
         today = datetime.utcnow().date().isoformat()
+        
+        # Get all interactions
         interactions = DB.find_many(
             "interactions",
             where={"business_owner_id": owner["id"]},
@@ -826,7 +943,9 @@ def get_customer_dashboard():
             limit=100
         )
         
+        # Filter today's calls
         today_calls = [i for i in interactions if i.get("created_at", "").startswith(today)]
+        
         calls_today = len(today_calls)
         emergencies_today = sum(1 for i in today_calls if i.get("is_emergency"))
         bookings_today = sum(1 for i in today_calls if i.get("type") == "booking")
@@ -845,8 +964,10 @@ def get_customer_dashboard():
         logger.error(f"Dashboard error: {e}")
         return jsonify({"error": str(e)}), 500
 
+
 @app.route("/api/customer/calls", methods=["GET"])
 def get_customer_calls():
+    """Get call history with AI summaries"""
     owner, err = require_app_auth()
     if err:
         return err
@@ -867,8 +988,10 @@ def get_customer_calls():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
 @app.route("/api/customer/bookings", methods=["GET"])
 def get_bookings():
+    """Get appointment list"""
     owner, err = require_app_auth()
     if err:
         return err
@@ -888,8 +1011,10 @@ def get_bookings():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
 @app.route("/api/customer/call-forwarding", methods=["GET", "POST"])
 def call_forwarding_toggle():
+    """Toggle call forwarding"""
     owner, err = require_app_auth()
     if err:
         return err
@@ -916,9 +1041,13 @@ def call_forwarding_toggle():
     
     return jsonify({"status": "updated", "enabled": enabled}), 200
 
-# Stripe billing
-@app.route("/api/billing/checkout", methods=["POST", "GET"])
+
+# =============================================================================
+# STRIPE SUBSCRIPTION
+# =============================================================================
+@app.route("/api/billing/checkout", methods=["POST"])
 def api_billing_checkout():
+    """Create Stripe checkout session for £75/month subscription"""
     owner, err = require_app_auth()
     if err:
         return err
@@ -947,8 +1076,10 @@ def api_billing_checkout():
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
-@app.route("/api/stripe/webhook", methods=["POST", "GET"])
+
+@app.route("/api/stripe/webhook", methods=["POST"])
 def api_stripe_webhook():
+    """Handle Stripe subscription webhooks"""
     if not STRIPE_WEBHOOK_SECRET:
         return jsonify({"error": "Stripe webhook not configured"}), 500
     
@@ -986,9 +1117,47 @@ def api_stripe_webhook():
     
     return jsonify({"received": True}), 200
 
+
+# =============================================================================
+# ADMIN PANEL
+# =============================================================================
+@app.route("/api/admin/pending-onboardings", methods=["GET"])
+def get_pending_onboardings():
+    """Get list of pending onboarding calls"""
+    try:
+        pending = DB.find_many(
+            "onboarding_calls",
+            where={"status": "pending"},
+            order_by="created_at ASC",
+        )
+        
+        for call in pending:
+            created = call.get("created_at")
+            if created:
+                waiting_hours = (datetime.utcnow() - created).total_seconds() / 3600
+                call["hours_waiting"] = round(waiting_hours, 1)
+        
+        return jsonify(pending), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/admin/onboarding/<onboarding_id>", methods=["GET"])
+def get_onboarding_detail(onboarding_id):
+    """Get onboarding call details"""
+    try:
+        onboarding = DB.find_one("onboarding_calls", {"id": onboarding_id})
+        if not onboarding:
+            return jsonify({"error": "Not found"}), 404
+        return jsonify(onboarding), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/health")
 def health():
     return jsonify({"status": "healthy"}), 200
+
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))

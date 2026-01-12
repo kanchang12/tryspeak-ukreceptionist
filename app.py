@@ -53,7 +53,7 @@ supabase_anon = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
 STRIPE_PRICE_ID = os.getenv("STRIPE_PRICE_ID")
-APP_BASE_URL = os.getenv("APP_BASE_URL", "https://tryspeak.site")
+APP_BASE_URL = os.getenv("APP_BASE_URL", https://tryspeak-recep-451954006366.europe-west1.run.app")
 stripe.api_key = STRIPE_SECRET_KEY
 
 # Voice AI Config

@@ -678,25 +678,33 @@ def twilio_stream(ws):
 # =============================================================================
 # HTML PAGES
 # =============================================================================
-@app.route("/")
+@app.route('/')
 def home():
-    return render_template("index.html")
+    return render_template('index.html')
 
-@app.route("/login")
+@app.route('/signup')
+def signup_page():
+    return render_template('signup.html')
+
+@app.route('/login')
 def login_page():
-    return render_template("login.html")
+    return render_template('login.html')
 
-@app.route("/dashboard")
+@app.route('/success')
+def success_page():
+    return render_template('success.html')
+
+@app.route('/dashboard')
 def dashboard_page():
-    return render_template("dashboard.html")
+    return render_template('dashboard.html')
 
-@app.route("/calls")
+@app.route('/calls')
 def calls_page():
-    return render_template("calls.html")
+    return render_template('calls.html')
 
-@app.route("/admin")
+@app.route('/admin')
 def admin_page():
-    return render_template("admin_dashboard.html")
+    return render_template('admin.html')
 
 
 # =============================================================================

@@ -189,6 +189,10 @@ def calls_page():
 def admin_page():
     return render_template("admin.html")
 
+@app.route("/referrals")
+def referrals_page():
+    return render_template("referrals.html")  # Create this later
+
 
 # =============================================================================
 # AUTH (SUPABASE OTP)

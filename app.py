@@ -472,20 +472,27 @@ def customer_call_ended():
         return "Webhook ready"
     
     data = request.get_json(silent=True) or {}
-    
-    # ✅ VAPI wraps everything in "message"
     message = data.get("message", {})
     call = message.get("call", {})
     phoneNumber = message.get("phoneNumber", {})
     
-    # Get actual phone number string
-    to_number = phoneNumber.get("number")  # "+447886074523"
-    from_number = call.get("customer", {}).get("number")  # "+447823656762"
+    # ✅ GET UNIQUE CALL ID
+    vapi_call_id = call.get("id")  # e.g., "019bb0c0-8818-7ee2-923e-f6056d280354"
+    
+    to_number = phoneNumber.get("number")
+    from_number = call.get("customer", {}).get("number")
     transcript = message.get("transcript", "")
     duration = int(message.get("durationSeconds", 0))
+    recording_url = message.get("recordingUrl", "")
 
-    if not to_number or not from_number:
+    if not to_number or not from_number or not vapi_call_id:
         return jsonify({"status": "ok"}), 200
+
+    # ✅ CHECK IF ALREADY PROCESSED
+    existing = DB.find_one("interactions", {"vapi_call_id": vapi_call_id})
+    if existing:
+        logger.info(f"Call {vapi_call_id} already processed - skipping")
+        return jsonify({"status": "duplicate"}), 200
 
     owner = DB.find_one("business_owners", {"vapi_phone_number": to_number})
     if not owner:
@@ -500,11 +507,14 @@ def customer_call_ended():
         new = DB.insert("their_customers", {"business_owner_id": owner["id"], "phone_number": from_number, "total_calls": 1})
         customer_id = new["id"]
 
+    # ✅ STORE WITH UNIQUE ID
     DB.insert("interactions", {
+        "vapi_call_id": vapi_call_id,  # ← ADD THIS
         "business_owner_id": owner["id"],
         "customer_id": customer_id,
         "caller_phone": from_number,
         "call_duration": duration,
+        "recording_url": recording_url,
         "transcript": transcript,
         "summary": transcript[:200],
         "is_emergency": any(k in transcript.lower() for k in ["burst", "leak", "emergency", "urgent"])

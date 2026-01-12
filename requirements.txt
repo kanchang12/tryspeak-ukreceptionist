@@ -7,14 +7,15 @@ stripe==7.8.0
 supabase==2.10.0
 itsdangerous==2.1.2
 requests==2.31.0
-gunicorn
+
 # Google Cloud
 google-genai==0.2.0
 google-cloud-speech==2.23.0
+google-cloud-texttospeech==2.16.0
 
 # ElevenLabs
 elevenlabs==1.0.0
-
+gunicorn
 # Twilio
 twilio==8.11.0
 

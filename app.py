@@ -547,7 +547,10 @@ Referral: {referral_code}""",
 # =============================================================================
 @app.route("/api/vapi/call-started", methods=["POST", "GET"])
 def customer_call_started():
+    logger.info("🔔 VAPI call-started webhook received")
     data = request.json
+    logger.info(f"Webhook data: {data}")
+    
     call = data.get("call", {})
     to_number = call.get("phoneNumberId")
     from_number = call.get("customer", {}).get("number")
@@ -555,25 +558,72 @@ def customer_call_started():
     try:
         owner = DB.find_one("business_owners", {"vapi_phone_number": to_number})
         if not owner:
-            return jsonify({"context": ""}), 200
+            logger.warning(f"No owner found for: {to_number}")
+            return jsonify({}), 200
 
         customer = DB.find_one(
             "their_customers",
-            {"business_owner_id": owner["id"], "phone_number": from_number},
+            {"business_owner_id": owner["id"], "phone_number": from_number}
         )
 
-        context = ""
-        if customer:
-            context = f"Returning customer: {customer.get('name', 'this customer')}. "
+        if not customer:
+            logger.info(f"NEW customer: {from_number}")
+            return jsonify({
+                "messages": [{
+                    "role": "system",
+                    "content": f"NEW CUSTOMER calling from {from_number}. First time calling. Greet warmly."
+                }]
+            }), 200
 
-        return jsonify({"context": context}), 200
-    except:
-        return jsonify({"context": ""}), 200
+        past_calls = DB.find_many(
+            "interactions",
+            where={"customer_id": customer["id"]},
+            order_by="created_at DESC",
+            limit=3
+        )
+
+        if past_calls:
+            last_call = past_calls[0]
+            last_summary = last_call.get("summary") or last_call.get("transcript", "")[:150]
+            
+            history_lines = []
+            for call in past_calls:
+                date = str(call.get("created_at", ""))[:10]
+                summary = call.get("summary", "No details")[:80]
+                history_lines.append(f"- {date}: {summary}")
+
+            context = f"""RETURNING CUSTOMER: {customer.get('name', 'Customer')}
+Phone: {from_number}
+Total calls: {customer.get('total_calls', 0)}
+
+LAST CALL: {last_summary}
+
+HISTORY:
+{chr(10).join(history_lines)}
+
+Acknowledge their history and ask if this is a follow-up."""
+        else:
+            context = f"RETURNING CUSTOMER: {from_number}. Total calls: {customer.get('total_calls', 0)}"
+
+        logger.info(f"✅ Context sent for customer {customer['id']}")
+        
+        return jsonify({
+            "messages": [{
+                "role": "system",
+                "content": context
+            }]
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Error: {e}", exc_info=True)
+        return jsonify({}), 200
 
 
 @app.route("/api/vapi/call-ended", methods=["POST", "GET"])
 def customer_call_ended():
+    logger.info("🔔 VAPI call-ended webhook received")
     data = request.json
+    
     call = data.get("call", {})
     to_number = call.get("phoneNumberId")
     from_number = call.get("customer", {}).get("number")
@@ -584,23 +634,26 @@ def customer_call_ended():
     try:
         owner = DB.find_one("business_owners", {"vapi_phone_number": to_number})
         if not owner:
+            logger.error(f"No owner for: {to_number}")
             return jsonify({"error": "Not found"}), 404
 
         customer = DB.find_one(
             "their_customers",
-            {"business_owner_id": owner["id"], "phone_number": from_number},
+            {"business_owner_id": owner["id"], "phone_number": from_number}
         )
 
         if customer:
-            DB.query(
-                "UPDATE their_customers SET total_calls = total_calls + 1 WHERE id = %s",
-                [customer["id"]],
+            updated_calls = customer.get("total_calls", 0) + 1
+            DB.update(
+                "their_customers",
+                {"id": customer["id"]},
+                {"total_calls": updated_calls}
             )
             customer_id = customer["id"]
         else:
             new_customer = DB.insert(
                 "their_customers",
-                {"business_owner_id": owner["id"], "phone_number": from_number, "total_calls": 1},
+                {"business_owner_id": owner["id"], "phone_number": from_number, "total_calls": 1}
             )
             customer_id = new_customer["id"]
 
@@ -619,8 +672,10 @@ def customer_call_ended():
                 "transcript": transcript,
                 "summary": transcript[:200],
                 "is_emergency": is_emergency,
-            },
+            }
         )
+
+        logger.info(f"✅ Call saved for customer {customer_id}")
 
         if is_emergency:
             send_sms(to=owner["phone_number"], message=f"🚨 EMERGENCY: {transcript[:100]}")
@@ -628,6 +683,7 @@ def customer_call_ended():
         return jsonify({"status": "success"}), 200
 
     except Exception as e:
+        logger.error(f"Error: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 
@@ -635,7 +691,7 @@ def customer_call_ended():
 # CUSTOMER APIs (auth + subscription gate)
 # =============================================================================
 @app.route("/api/customer/dashboard", methods=["GET"])
-@app.route("/api/customer/dashboard", methods=["GET"])
+
 def get_customer_dashboard():
     owner, err = require_app_auth()
     if err:
